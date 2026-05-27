@@ -42,3 +42,25 @@ terraform.rc
 # Optional: ignore plan files saved before destroying Terraform configuration
 # Uncomment the line below if you want to ignore planout files.
 # planout
+
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.log
+
+.env
+.env.*
+!.env.example
+
+backend/terraform/generated/
+terraform.tfstate
+terraform.tfstate.*
+.terraform/
+.terraform.lock.hcl
+
+ingress/certs/server.key
+
+# Node
+frontend/node_modules/
+frontend/dist/
