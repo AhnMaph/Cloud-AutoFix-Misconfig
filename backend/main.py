@@ -114,10 +114,12 @@ def admin_headers():
 
 def get_group_id_by_path(path: str):
     headers = admin_headers()
+    target_path = "/" + path.strip("/")
 
     r = requests.get(
-        f"{ADMIN_GROUPS_URL}",
+        ADMIN_GROUPS_URL,
         headers=headers,
+        params={"briefRepresentation": "false"},
         timeout=10
     )
 
@@ -126,12 +128,18 @@ def get_group_id_by_path(path: str):
 
     groups = r.json()
 
-    def walk(group):
-        if group.get("path") == path:
+    def walk(group, parent_path=""):
+        name = group.get("name")
+        if not name:
+            return None
+
+        current_path = group.get("path") or f"{parent_path}/{name}"
+
+        if current_path == target_path:
             return group.get("id")
 
-        for sub in group.get("subGroups", []):
-            found = walk(sub)
+        for sub in group.get("subGroups", []) or []:
+            found = walk(sub, current_path)
             if found:
                 return found
 
@@ -147,8 +155,8 @@ def get_group_id_by_path(path: str):
 
 def create_tenant_group_if_missing(tenant_id: str):
     path = f"/tenants/{tenant_id}"
-    existing_id = get_group_id_by_path(path)
 
+    existing_id = get_group_id_by_path(path)
     if existing_id:
         return existing_id
 
@@ -165,21 +173,26 @@ def create_tenant_group_if_missing(tenant_id: str):
         timeout=10
     )
 
-    if r.status_code not in [201, 204]:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Cannot create tenant group: {r.text}"
-        )
+    if r.status_code in [201, 204]:
+        location = r.headers.get("Location")
+        if location:
+            return location.rstrip("/").split("/")[-1]
 
-    location = r.headers.get("Location")
-    if location:
-        return location.rstrip("/").split("/")[-1]
+        new_id = get_group_id_by_path(path)
+        if new_id:
+            return new_id
 
-    new_id = get_group_id_by_path(path)
-    if not new_id:
         raise HTTPException(status_code=500, detail="Tenant group created but not found")
 
-    return new_id
+    if r.status_code == 409:
+        existing_id = get_group_id_by_path(path)
+        if existing_id:
+            return existing_id
+
+    raise HTTPException(
+        status_code=500,
+        detail=f"Cannot create tenant group: {r.text}"
+    )
 
 
 def get_user_id(username: str):
@@ -438,7 +451,10 @@ def register(req: RegisterRequest):
         "username": req.username,
         "enabled": True,
         "emailVerified": True,
-        "email": req.email,
+        "requiredActions": [],
+        "firstName": req.username,
+        "lastName": tenant_id,
+        "email": req.email or f"{req.username}@local.test",
         "attributes": {
             "tenant_id": [tenant_id]
         },
