@@ -1,0 +1,90 @@
+variable "aws_region" {
+  type    = string
+  default = "{{ aws_region }}"
+}
+
+variable "tenant_id" {
+  type    = string
+  default = "{{ tenant_id }}"
+}
+
+variable "project_name" {
+  type    = string
+  default = "{{ project_name }}"
+}
+
+variable "bucket_suffix" {
+  type    = string
+  default = "{{ bucket_suffix | default('storage') }}"
+}
+
+variable "versioning" {
+  type    = string
+  default = "{{ versioning | default('Enabled') }}"
+}
+
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = ">= 5.0, < 7.0"
+    }
+    random = {
+      source  = "hashicorp/random"
+      version = ">= 3.5.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = var.aws_region
+}
+
+resource "random_id" "suffix" {
+  byte_length = 4
+}
+
+locals {
+  bucket_name = lower("${var.project_name}-${var.tenant_id}-${var.bucket_suffix}-${random_id.suffix.hex}")
+}
+
+resource "aws_s3_bucket" "tenant_bucket" {
+  bucket = local.bucket_name
+
+  tags = {
+    Project   = var.project_name
+    Tenant    = var.tenant_id
+    ManagedBy = "hybrid-cloud-portal"
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "tenant_bucket" {
+  bucket = aws_s3_bucket.tenant_bucket.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_versioning" "tenant_bucket" {
+  bucket = aws_s3_bucket.tenant_bucket.id
+
+  versioning_configuration {
+    status = var.versioning
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "tenant_bucket" {
+  bucket = aws_s3_bucket.tenant_bucket.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+output "bucket_name" {
+  value = aws_s3_bucket.tenant_bucket.bucket
+}

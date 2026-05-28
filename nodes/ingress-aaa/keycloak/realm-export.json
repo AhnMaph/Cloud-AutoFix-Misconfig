@@ -1,0 +1,65 @@
+{
+  "realm": "hybrid-cloud",
+  "enabled": true,
+  "roles": {
+    "realm": [
+      {
+        "name": "tenant"
+      },
+      {
+        "name": "deploy_aws"
+      },
+      {
+        "name": "deploy_openstack"
+      },
+      {
+        "name": "view_resource"
+      },
+      {
+        "name": "remediate_iac"
+      },
+      {
+        "name": "admin"
+      }
+    ]
+  },
+  "groups": [
+    {
+      "name": "tenants",
+      "subGroups": [
+        {
+          "name": "tenant-a"
+        },
+        {
+          "name": "tenant-b"
+        }
+      ]
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "hybrid-cloud-portal",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "bearerOnly": false,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "implicitFlowEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [
+        "https://100.21.43.100/*",
+        "http://100.21.43.100/*",
+        "http://localhost:5173/*"
+      ],
+      "webOrigins": [
+        "https://100.21.43.100",
+        "http://100.21.43.100",
+        "http://localhost:5173"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      }
+    }
+  ]
+}
