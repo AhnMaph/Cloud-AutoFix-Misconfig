@@ -1,0 +1,87 @@
+services:
+  ingress:
+    image: nginx:alpine
+    container_name: ingress-control
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./ingress/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./ingress/certs:/etc/nginx/certs:ro 
+    depends_on:
+      - frontend
+      - backend
+      - keycloak
+    networks:
+      - portal-net
+    restart: unless-stopped
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:latest
+    container_name: keycloak
+    command: start-dev --import-realm
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+
+      KC_HTTP_ENABLED: "true"
+      KC_HTTP_RELATIVE_PATH: /auth
+
+      KC_PROXY_HEADERS: xforwarded
+      KC_HOSTNAME_STRICT: "false"
+
+    volumes:
+      - keycloak_data:/opt/keycloak/data
+      - ./keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+    networks:
+      - portal-net
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+    container_name: portal-backend
+    environment:
+      KEYCLOAK_INTERNAL_URL: http://keycloak:8080/auth
+      KEYCLOAK_PUBLIC_URL: https://${SERVER_IP}/auth
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM}
+      KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID}
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      FRONTEND_URL: https://${SERVER_IP}
+
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+      AWS_PROJECT_NAME: hybrid-portal
+      TERRAFORM_STATE_ROOT: /app/tfstate
+      AWS_TF_TEMPLATE_DIR: /app/terraform/aws/s3_private_bucket
+    volumes:
+      - terraform_state:/app/tfstate
+    networks:
+      - portal-net
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_KEYCLOAK_URL: https://${SERVER_IP}/auth
+        VITE_KEYCLOAK_REALM: ${KEYCLOAK_REALM}
+        VITE_KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID}
+        VITE_BACKEND_URL: https://${SERVER_IP}/api
+        VITE_FRONTEND_URL: https://${SERVER_IP}
+    container_name: portal-frontend
+    depends_on:
+      - backend
+    networks:
+      - portal-net
+    restart: unless-stopped
+
+volumes:
+  keycloak_data:
+  terraform_state:
+
+networks:
+  portal-net:
+    driver: bridge

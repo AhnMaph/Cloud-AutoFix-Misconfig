@@ -1,0 +1,20 @@
+rules:
+  - resource_type: database
+    provider: openstack
+    reason: "sensitive data - on-premise"
+
+  - resource_type: object_storage
+    provider: aws
+    reason: "scalable blob storage"
+
+  - resource_type: vm
+    provider: openstack
+    reason: "compute on-premise by default"
+
+  - resource_type: cache
+    provider: aws
+    reason: "elasticache"
+
+  # fallback
+  - resource_type: "*"
+    provider: aws
