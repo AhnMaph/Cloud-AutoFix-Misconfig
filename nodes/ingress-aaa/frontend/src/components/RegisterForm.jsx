@@ -5,7 +5,7 @@ import { styles } from "../styles";
 const API_URL = import.meta.env.VITE_BACKEND_URL;
 
 export default function RegisterForm({ onSuccess }) {
-  const [form, setForm]       = useState({ username: "", password: "", email: "", tenant_id: "" });
+  const [form, setForm]       = useState({ username: "", password: "", email: "" });
   const [loading, setLoading] = useState(false);
   const [error, setError]     = useState(null);
   const [success, setSuccess] = useState(null);
@@ -15,14 +15,27 @@ export default function RegisterForm({ onSuccess }) {
   async function handleRegister() {
     setError(null);
     setSuccess(null);
-    if (!form.username || !form.password || !form.tenant_id) {
-      setError("Username, password và tenant ID là bắt buộc.");
+
+    if (!form.username || !form.password) {
+      setError("Username và password là bắt buộc.");
       return;
     }
+
     setLoading(true);
+
     try {
-      const res = await axios.post(`${API_URL}/auth/register`, form);
-      setSuccess(`Đăng ký thành công! User: ${res.data.username} — Tenant: ${res.data.tenant_id}`);
+      const payload = {
+        username: form.username.trim(),
+        password: form.password,
+        email: form.email.trim() || null,
+      };
+
+      const res = await axios.post(`${API_URL}/auth/register`, payload);
+
+      setSuccess(
+        `Đăng ký thành công! User: ${res.data.username} — Tenant tự động: ${res.data.tenant_id}`
+      );
+
       setTimeout(() => onSuccess?.(), 1500);
     } catch (err) {
       setError(err.response?.data?.detail || JSON.stringify(err.response?.data) || err.message);
@@ -35,23 +48,40 @@ export default function RegisterForm({ onSuccess }) {
     <>
       <div style={styles.field}>
         <label style={styles.label}>Username *</label>
-        <input style={styles.input} value={form.username} onChange={set("username")} placeholder="vd: alice" />
+        <input
+          style={styles.input}
+          value={form.username}
+          onChange={set("username")}
+          placeholder="vd: alice"
+        />
       </div>
+
       <div style={styles.field}>
         <label style={styles.label}>Password *</label>
-        <input style={styles.input} type="password" value={form.password} onChange={set("password")} placeholder="tối thiểu 6 ký tự" />
+        <input
+          style={styles.input}
+          type="password"
+          value={form.password}
+          onChange={set("password")}
+          placeholder="tối thiểu 6 ký tự"
+        />
       </div>
+
       <div style={styles.field}>
         <label style={styles.label}>Email</label>
-        <input style={styles.input} type="email" value={form.email} onChange={set("email")} placeholder="alice@example.com" />
+        <input
+          style={styles.input}
+          type="email"
+          value={form.email}
+          onChange={set("email")}
+          placeholder="alice@example.com"
+        />
       </div>
-      <div style={styles.field}>
-        <label style={styles.label}>Tenant ID *</label>
-        <input style={styles.input} value={form.tenant_id} onChange={set("tenant_id")} placeholder="vd: tenant-a" />
-      </div>
+
       <button style={styles.btn("primary")} onClick={handleRegister} disabled={loading}>
         {loading ? "Đang tạo tài khoản..." : "Đăng ký"}
       </button>
+
       {error   && <div style={styles.error}>⚠ {error}</div>}
       {success && <div style={styles.success}>✓ {success}</div>}
     </>

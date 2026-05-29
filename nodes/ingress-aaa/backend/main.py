@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import requests
 
@@ -9,14 +10,35 @@ import jwt
 from jwt import PyJWKClient
 from typing import Literal
 
-from providers.aws import terraform_aws_deploy
-from policy.engine import resolve_provider
+from providers.aws import terraform_aws_deploy, create_tenant_iam_role
+try:
+    from providers.openstack import create_tenant_project
+except Exception:
+    create_tenant_project = Nonefrom policy.engine import resolve_provider
+    
 from template_generator import generate_template
+from tenants import (
+    create_tenant_record,
+    get_tenant_record,
+    update_tenant_record,
+    list_tenant_records,
+)
 
 KEYCLOAK_INTERNAL_URL = os.getenv("KEYCLOAK_INTERNAL_URL", "http://keycloak:8080/auth")
 KEYCLOAK_PUBLIC_URL = os.getenv("KEYCLOAK_PUBLIC_URL", KEYCLOAK_INTERNAL_URL)
 KEYCLOAK_ADMIN = os.getenv("KEYCLOAK_ADMIN")
 KEYCLOAK_ADMIN_PASSWORD = os.getenv("KEYCLOAK_ADMIN_PASSWORD")
+
+def env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+
+    if value is None:
+        return default
+
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+OPENSTACK_ENABLED = env_bool("OPENSTACK_ENABLED", False)
 
 REALM     = os.getenv("KEYCLOAK_REALM", "hybrid-cloud")
 CLIENT_ID = os.getenv("KEYCLOAK_CLIENT_ID", "hybrid-cloud-portal")
@@ -49,8 +71,6 @@ class RegisterRequest(BaseModel):
     username: str = Field(min_length=3)
     password: str = Field(min_length=6)
     email: str | None = None
-    tenant_id: str = Field(default="tenant-a")
-
 
 class LoginRequest(BaseModel):
     username: str
@@ -65,6 +85,27 @@ class DeployRequest(BaseModel):
     action: Literal["plan", "apply", "destroy"] = "plan"
     region: str = os.getenv("AWS_DEFAULT_REGION", "us-east-1")
     extra: dict = {}
+
+def safe_slug(value: str, max_len: int = 38) -> str:
+    value = value.lower().strip()
+    value = re.sub(r"[^a-z0-9-]", "-", value)
+    value = re.sub(r"-+", "-", value).strip("-")
+
+    if not value:
+        raise HTTPException(status_code=400, detail="Invalid username for tenant_id generation")
+
+    return value[:max_len]
+
+
+def generate_tenant_id(username: str) -> str:
+    """
+    1 user = 1 tenant.
+    Ví dụ:
+      alice      -> t-alice
+      bob_123    -> t-bob-123
+      Alice Lee  -> t-alice-lee
+    """
+    return f"t-{safe_slug(username)}"
 
 def wait_keycloak():
     for _ in range(30):
@@ -352,18 +393,30 @@ def require_role(payload, role_name: str):
         )
 
 
-def extract_tenant_id(payload):
-    groups = payload.get("groups", [])
+def extract_tenant_id(user: dict) -> str:
+    if user.get("tenant_id"):
+        tenant_value = user["tenant_id"]
+
+        if isinstance(tenant_value, list):
+            return tenant_value[0]
+
+        return tenant_value
+
+    groups = user.get("groups", [])
 
     for group in groups:
         if group.startswith("/tenants/"):
             return group.split("/")[-1]
 
-    attributes = payload.get("tenant_id")
-    if attributes:
-        return attributes
+    username = user.get("preferred_username")
+    if username:
+        return generate_tenant_id(username)
 
-    return None
+    sub = user.get("sub")
+    if sub:
+        return f"t-{sub[:12]}"
+
+    raise HTTPException(status_code=400, detail="Cannot determine tenant_id")
 
 # Cloud provider operations
 def get_roles_from_token(user: dict) -> set[str]:
@@ -377,28 +430,6 @@ def get_roles_from_token(user: dict) -> set[str]:
         roles.update(client_data.get("roles", []))
 
     return roles
-
-
-def extract_tenant_id(user: dict) -> str:
-    if user.get("tenant_id"):
-        return user["tenant_id"]
-
-    groups = user.get("groups", [])
-
-    for group in groups:
-        # Ví dụ: /tenants/tenant-a
-        if group.startswith("/tenants/"):
-            return group.split("/")[-1]
-
-    username = user.get("preferred_username")
-    if username:
-        return username
-
-    sub = user.get("sub")
-    if sub:
-        return sub[:12]
-
-    raise HTTPException(status_code=400, detail="Cannot determine tenant_id")
 
 def get_current_user(authorization: str | None = Header(default=None)):
     if not authorization:
@@ -436,25 +467,30 @@ def root():
 
 @app.post("/auth/register")
 def register(req: RegisterRequest):
-    tenant_id = req.tenant_id.strip().lower()
-
-    if not tenant_id.replace("-", "").isalnum():
-        raise HTTPException(status_code=400, detail="Invalid tenant_id")
+    username = req.username.strip()
+    tenant_id = generate_tenant_id(username)
 
     headers = admin_headers()
 
-    existing_user = get_user_id(req.username)
+    existing_user = get_user_id(username)
     if existing_user:
         raise HTTPException(status_code=409, detail="Username already exists")
 
+    existing_tenant_group = get_group_id_by_path(f"/tenants/{tenant_id}")
+    if existing_tenant_group:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Tenant already exists: {tenant_id}"
+        )
+
     user_payload = {
-        "username": req.username,
+        "username": username,
         "enabled": True,
         "emailVerified": True,
         "requiredActions": [],
-        "firstName": req.username,
+        "firstName": username,
         "lastName": tenant_id,
-        "email": req.email or f"{req.username}@local.test",
+        "email": req.email or f"{username}@local.test",
         "attributes": {
             "tenant_id": [tenant_id]
         },
@@ -480,19 +516,110 @@ def register(req: RegisterRequest):
             detail=f"Cannot create user: {r.text}"
         )
 
-    user_id = get_user_id(req.username)
+    user_id = get_user_id(username)
 
     group_id = create_tenant_group_if_missing(tenant_id)
     add_user_to_group(user_id, group_id)
 
     assign_realm_role(user_id, "tenant")
     assign_realm_role(user_id, "view_resource")
+    
+    tenant_record = create_tenant_record(
+        tenant_id=tenant_id,
+        username=username,
+        email=req.email or f"{username}@local.test",
+    )
+    
+    aws_account_id = os.getenv("AWS_ACCOUNT_ID")
 
+    if aws_account_id:
+        try:
+            aws_role = create_tenant_iam_role(
+                tenant_id=tenant_id,
+                aws_account_id=aws_account_id,
+            )
+
+            tenant_record = update_tenant_record(
+                tenant_id,
+                {
+                    "aws": {
+                        "role_name": aws_role["role_name"],
+                        "role_arn": aws_role["role_arn"],
+                        "provisioned": True,
+                        "last_error": None,
+                    }
+                },
+            )
+
+        except Exception as e:
+            tenant_record = update_tenant_record(
+                tenant_id,
+                {
+                    "aws": {
+                        "provisioned": False,
+                        "last_error": str(e),
+                    }
+                },
+            )
+        
+    else:
+        tenant_record = update_tenant_record(
+            tenant_id,
+            {
+                "aws": {
+                    "provisioned": False,
+                    "last_error": "Missing AWS_ACCOUNT_ID",
+                }
+            },
+        )
+        
+    if OPENSTACK_ENABLED and create_tenant_project:
+        try:
+            os_project = create_tenant_project(tenant_id)
+
+            tenant_record = update_tenant_record(
+                tenant_id,
+                {
+                    "openstack": {
+                        "project_name": os_project["project_name"],
+                        "project_id": os_project["project_id"],
+                        "provisioned": True,
+                        "last_error": None,
+                    }
+                },
+            )
+
+        except Exception as e:
+            tenant_record = update_tenant_record(
+                tenant_id,
+                {
+                    "openstack": {
+                        "project_name": tenant_id,
+                        "project_id": None,
+                        "provisioned": False,
+                        "last_error": str(e),
+                    }
+                },
+            )
+    else:
+        tenant_record = update_tenant_record(
+            tenant_id,
+            {
+                "openstack": {
+                    "project_name": tenant_id,
+                    "project_id": None,
+                    "provisioned": False,
+                    "last_error": "OpenStack provisioning is disabled",
+                }
+            },
+        )
+    
     return {
         "status": "created",
         "message": "User registered successfully",
-        "username": req.username,
+        "username": username,
         "tenant_id": tenant_id,
+        "tenant": tenant_record,
         "default_roles": ["tenant", "view_resource"]
     }
 
@@ -511,13 +638,40 @@ def login(req: LoginRequest):
 @app.get("/me")
 def me(current_user: dict = Depends(get_current_user)):
     roles = get_roles(current_user)
+    tenant_id = extract_tenant_id(current_user)
+    tenant_record = get_tenant_record(tenant_id)
 
     return {
         "username": current_user.get("preferred_username"),
         "email": current_user.get("email"),
         "roles": roles,
         "groups": current_user.get("groups", []),
-        "tenant_id": extract_tenant_id(current_user)
+        "tenant_id": tenant_id,
+        "tenant": tenant_record,
+    }
+
+@app.get("/tenants/me")
+def my_tenant(current_user: dict = Depends(get_current_user)):
+    tenant_id = extract_tenant_id(current_user)
+    tenant_record = get_tenant_record(tenant_id)
+
+    if not tenant_record:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Tenant record not found: {tenant_id}"
+        )
+
+    return tenant_record
+
+@app.get("/tenants")
+def tenants(current_user: dict = Depends(get_current_user)):
+    roles = get_roles_from_token(current_user)
+
+    if "admin" not in roles:
+        raise HTTPException(status_code=403, detail="Missing role: admin")
+
+    return {
+        "items": list_tenant_records()
     }
 
 @app.post("/scan/iac")
@@ -594,6 +748,12 @@ def deploy(
 
     # Policy engine quyết định provider
     provider = resolve_provider(req.resource_type)
+    
+    if provider == "openstack" and not OPENSTACK_ENABLED:
+    raise HTTPException(
+        status_code=503,
+        detail="OpenStack provider is temporarily disabled"
+    )
 
     # Generate .tf file từ Jinja2 template
     context = {

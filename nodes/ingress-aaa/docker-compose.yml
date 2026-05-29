@@ -50,6 +50,7 @@ services:
       KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
       FRONTEND_URL: https://${SERVER_IP}
 
+      AWS_ACCOUNT_ID: ${AWS_ACCOUNT_ID}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
@@ -57,8 +58,20 @@ services:
       AWS_PROJECT_NAME: hybrid-portal
       TERRAFORM_STATE_ROOT: /app/tfstate
       AWS_TF_TEMPLATE_DIR: /app/terraform/aws/s3_private_bucket
+
+      OPENSTACK_ENABLED: ${OPENSTACK_ENABLED:-false}
+      OS_AUTH_URL: ${OS_AUTH_URL}
+      OS_USERNAME: ${OS_USERNAME}
+      OS_PASSWORD: ${OS_PASSWORD}
+      OS_USER_DOMAIN_NAME: ${OS_USER_DOMAIN_NAME:-Default}
+      OS_PROJECT_NAME: ${OS_PROJECT_NAME:-admin}
+      OS_PROJECT_DOMAIN_NAME: ${OS_PROJECT_DOMAIN_NAME:-Default}
+      OS_REGION_NAME: ${OS_REGION_NAME:-RegionOne}
+
+      TENANT_REGISTRY_PATH: /app/data/tenants.json
     volumes:
       - terraform_state:/app/tfstate
+      - tenant_data:/app/data
     networks:
       - portal-net
 
@@ -81,6 +94,7 @@ services:
 volumes:
   keycloak_data:
   terraform_state:
+  tenant_data:
 
 networks:
   portal-net:
