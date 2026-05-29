@@ -1,5 +1,3 @@
-version: "3.8"
-
 # ============================================================
 # VM1 — CI/CD + IaC + Scanner + OPA
 # Gitea 1.25.5 | Woodpecker CI 3.14.0 | OPA 0.73.0
@@ -134,7 +132,7 @@ services:
       # Docker backend config - agent dùng Docker socket để chạy steps
       - WOODPECKER_BACKEND=docker
       # QUAN TRỌNG: agent phải cùng network với Gitea để clone repo
-      - WOODPECKER_BACKEND_DOCKER_NETWORK=vm1-cicd_cicd-net
+      - WOODPECKER_BACKEND_DOCKER_NETWORK=cicd-global-net
       # Hostname để Gitea biết agent đang ở đâu
       - WOODPECKER_HOSTNAME=woodpecker-agent
       - WOODPECKER_LOG_LEVEL=info
@@ -340,6 +338,7 @@ volumes:
 # ============================================================
 networks:
   cicd-net:
+    name: cicd-global-net
     driver: bridge
     ipam:
       config:
