@@ -1,0 +1,348 @@
+version: "3.8"
+
+# ============================================================
+# VM1 — CI/CD + IaC + Scanner + OPA
+# Gitea 1.25.5 | Woodpecker CI 3.14.0 | OPA 0.73.0
+# Ubuntu 22.04 | 6 vCPU | 8 GB RAM
+# ============================================================
+
+services:
+
+  # ----------------------------------------------------------
+  # GITEA — Private Git Repository
+  # UI: http://<VM1_IP>:3000
+  # ----------------------------------------------------------
+  gitea:
+    image: gitea/gitea:${GITEA_VERSION:-1.25.5}
+    container_name: gitea
+    restart: unless-stopped
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      - GITEA__server__DOMAIN=${GITEA_DOMAIN:-192.168.154.129}
+      - GITEA__server__ROOT_URL=${GITEA_ROOT_URL:-http://192.168.154.129:3000}
+      - GITEA__server__HTTP_PORT=3000
+      - GITEA__server__SSH_PORT=2222
+      - GITEA__server__SSH_LISTEN_PORT=22
+      # Database - SQLite đủ cho lab
+      - GITEA__database__DB_TYPE=sqlite3
+      - GITEA__database__PATH=/data/gitea/gitea.db
+      # Security
+      - GITEA__security__SECRET_KEY=${GITEA_SECRET_KEY}
+      - GITEA__security__INTERNAL_TOKEN=${GITEA_INTERNAL_TOKEN}
+      # Webhook - BẮT BUỘC để Woodpecker nhận được event từ Gitea cùng host
+      - GITEA__webhook__ALLOWED_HOST_LIST=*
+      - GITEA__webhook__SKIP_TLS_VERIFY=true
+      # Cho phép webhook gọi về địa chỉ nội bộ (Gitea >= 1.16)
+      - GITEA__security__ALLOW_LOCALNETWORKS=true
+      # Admin account khởi tạo lần đầu
+      - GITEA__admin__DEFAULT_ADMIN_NAME=${GITEA_ADMIN_USER:-gitea-admin}
+      - GITEA__admin__DEFAULT_ADMIN_PASSWORD=${GITEA_ADMIN_PASSWORD}
+      - GITEA__admin__DEFAULT_ADMIN_EMAIL=${GITEA_ADMIN_EMAIL}
+    ports:
+      - "3000:3000"   # HTTP Web UI
+      - "2222:22"     # SSH clone
+    volumes:
+      - gitea-data:/data
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    networks:
+      cicd-net:
+        ipv4_address: ${GITEA_IP:-172.20.0.10}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    mem_limit: 512m
+    mem_reservation: 256m
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  # ----------------------------------------------------------
+  # WOODPECKER SERVER — CI/CD Orchestrator
+  # UI: http://<VM1_IP>:8000
+  # Cần tạo OAuth2 App trong Gitea trước (xem README)
+  # ----------------------------------------------------------
+  woodpecker-server:
+    image: woodpeckerci/woodpecker-server:${WOODPECKER_VERSION:-3.14.0}
+    container_name: woodpecker-server
+    restart: unless-stopped
+    depends_on:
+      gitea:
+        condition: service_healthy
+    environment:
+      # URL công khai của Woodpecker (phải khớp với OAuth callback)
+      - WOODPECKER_HOST=${WOODPECKER_HOST:-http://192.168.154.129:8000}
+      - WOODPECKER_SERVER_ADDR=:8000
+      - WOODPECKER_GRPC_ADDR=:9000
+      # Secret xác thực server <-> agent
+      - WOODPECKER_AGENT_SECRET=${WOODPECKER_AGENT_SECRET}
+      # Gitea OAuth2 integration
+      - WOODPECKER_GITEA=true
+      - WOODPECKER_GITEA_URL=${GITEA_ROOT_URL:-http://192.168.154.129:3000}
+      - WOODPECKER_GITEA_SERVER=http://gitea:3000
+      - WOODPECKER_GITEA_CLIENT=${WOODPECKER_GITEA_CLIENT}
+      - WOODPECKER_GITEA_SECRET=${WOODPECKER_GITEA_SECRET}
+      # Admin user (Gitea username)
+      - WOODPECKER_ADMIN=${WOODPECKER_ADMIN:-gitea-admin}
+      # Giới hạn repo (để trống = tất cả)
+      - WOODPECKER_REPO_OWNERS=${WOODPECKER_ADMIN:-gitea-admin}
+      # Database - SQLite cho lab
+      - WOODPECKER_DATABASE_DRIVER=sqlite3
+      - WOODPECKER_DATABASE_DATASOURCE=/var/lib/woodpecker/woodpecker.sqlite
+      # Log
+      - WOODPECKER_OPEN=true
+      - WOODPECKER_LOG_LEVEL=info
+    ports:
+      - "8000:8000"   # Web UI + API
+      - "9000:9000"   # gRPC server-agent
+    volumes:
+      - woodpecker-server-data:/var/lib/woodpecker
+    networks:
+      cicd-net:
+        ipv4_address: ${WOODPECKER_SERVER_IP:-172.20.0.11}
+    mem_limit: 256m
+    mem_reservation: 128m
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  # ----------------------------------------------------------
+  # WOODPECKER AGENT — Thực thi pipeline steps trong Docker
+  # Agent cần mount Docker socket để spawn container cho mỗi step
+  # ----------------------------------------------------------
+  # docker pull woodpeckerci/woodpecker-agent:next-0fe5bc1b44
+  woodpecker-agent:
+    image: woodpeckerci/woodpecker-agent:${WOODPECKER_VERSION:-3.14.0}
+    container_name: woodpecker-agent
+    restart: unless-stopped
+    depends_on:
+      - woodpecker-server
+    environment:
+      # Kết nối đến server qua gRPC
+      - WOODPECKER_SERVER=woodpecker-server:9000
+      - WOODPECKER_AGENT_SECRET=${WOODPECKER_AGENT_SECRET}
+      # Số pipeline chạy song song (phù hợp với 6 vCPU lab)
+      - WOODPECKER_MAX_WORKFLOWS=2
+      # Docker backend config - agent dùng Docker socket để chạy steps
+      - WOODPECKER_BACKEND=docker
+      # QUAN TRỌNG: agent phải cùng network với Gitea để clone repo
+      - WOODPECKER_BACKEND_DOCKER_NETWORK=vm1-cicd_cicd-net
+      # Hostname để Gitea biết agent đang ở đâu
+      - WOODPECKER_HOSTNAME=woodpecker-agent
+      - WOODPECKER_LOG_LEVEL=info
+    volumes:
+      # Mount Docker socket — agent dùng để tạo container chạy pipeline steps
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Mount thư mục tools để scanner chạy không cần pull image lại
+      - scanner-tools:/opt/scanner-tools
+    networks:
+      cicd-net:
+        ipv4_address: ${WOODPECKER_AGENT_IP:-172.20.0.12}
+    mem_limit: 1g
+    mem_reservation: 512m
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  # ----------------------------------------------------------
+  # OPA — Open Policy Agent
+  # REST API: http://<VM1_IP>:8181
+  # Nhận kết quả scan từ Woodpecker, trả về allow/deny
+  # ----------------------------------------------------------
+  opa:
+    image: openpolicyagent/opa:${OPA_VERSION:-0.73.0}
+    container_name: opa
+    restart: unless-stopped
+    command:
+      - "run"
+      - "--server"
+      - "--addr=0.0.0.0:8181"
+      - "--log-level=${OPA_LOG_LEVEL:-info}"
+      - "--log-format=json"
+      # Nạp tất cả policy từ thư mục /policies
+      - "/policies"
+    ports:
+      - "8181:8181"   # OPA REST API
+    volumes:
+      # Mount thư mục chứa file .rego policy
+      - ./policies:/policies:ro
+    networks:
+      cicd-net:
+        ipv4_address: ${OPA_IP:-172.20.0.13}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8181/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    mem_limit: 256m
+    mem_reservation: 128m
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "3"
+# ----------------------------------------------------------
+  # ELASTICSEARCH — Lưu trữ và index log/kết quả scan
+  # UI: không có, truy cập qua API hoặc Kibana
+  # API: http://<VM1_IP>:9200
+  # ----------------------------------------------------------
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${ELASTIC_VERSION:-8.13.0}
+    container_name: elasticsearch
+    restart: unless-stopped
+    environment:
+      - node.name=elasticsearch
+      - cluster.name=lab-cluster
+      - discovery.type=single-node        # Lab mode, không cần cluster
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD:-ChangeMe2024!}
+      - bootstrap.memory_lock=true        # Tránh swap làm chậm ES
+      - xpack.security.enabled=true       # Bật auth
+      - xpack.security.http.ssl.enabled=false  # Tắt SSL cho lab
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m" # Giới hạn RAM cho lab
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    ports:
+      - "9200:9200"
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    networks:
+      cicd-net:
+        ipv4_address: ${ELK_IP:-172.20.0.20}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -u elastic:${ELASTIC_PASSWORD} http://localhost:9200/_cluster/health | grep -q '\"status\":\"green\"\\|\"status\":\"yellow\"'"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    mem_limit: 1g
+    mem_reservation: 512m
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  # ----------------------------------------------------------
+  # LOGSTASH — Nhận log từ Woodpecker pipeline, parse, gửi ES
+  # Pipeline nhận HTTP POST tại port 5055
+  # ----------------------------------------------------------
+  logstash:
+    image: docker.elastic.co/logstash/logstash:${ELASTIC_VERSION:-8.13.0}
+    container_name: logstash
+    restart: unless-stopped
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD:-ChangeMe2024!}
+      - "LS_JAVA_OPTS=-Xms256m -Xmx256m"
+    ports:
+      - "5055:5055"    # HTTP input từ Woodpecker pipeline
+    volumes:
+      - ./elk/logstash/pipeline:/usr/share/logstash/pipeline:ro
+      - ./elk/logstash/config/logstash.yml:/usr/share/logstash/config/logstash.yml:ro
+    networks:
+      cicd-net:
+        ipv4_address: ${LOGSTASH_IP:-172.20.0.21}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9600/_node/stats | grep -q 'status'"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+    mem_limit: 1g
+    mem_reservation: 256m
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  # ----------------------------------------------------------
+  # KIBANA — Dashboard visualize log và kết quả scan
+  # UI: http://<VM1_IP>:5601
+  # ----------------------------------------------------------
+  kibana:
+    image: docker.elastic.co/kibana/kibana:${ELASTIC_VERSION:-8.13.0}
+    container_name: kibana
+    restart: unless-stopped
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - ELASTICSEARCH_USERNAME=kibana_system
+      - ELASTICSEARCH_PASSWORD=${KIBANA_PASSWORD:-ChangeMe2024!}
+      - XPACK_SECURITY_ENCRYPTIONKEY=a7f3d9c2b8e1f4a6d0c5b2e8f1a3d7c9  # 32+ chars
+      - XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY=b8e2f1a4d9c3b7e0f5a2d6c1b4e8f3a7
+    ports:
+      - "5601:5601"
+    networks:
+      cicd-net:
+        ipv4_address: ${KIBANA_IP:-172.20.0.22}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:5601/api/status | grep -q 'available'"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    mem_limit: 1500m
+    mem_reservation: 256m
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+# ============================================================
+# VOLUMES — lưu trữ persistent trên host
+# Dữ liệu thật nằm ở /var/lib/docker/volumes/vm1-cicd_<name>
+# ============================================================
+volumes:
+  gitea-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./data/gitea
+
+  woodpecker-server-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./data/woodpecker
+
+  scanner-tools:
+    driver: local
+
+  elasticsearch-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./data/elasticsearch
+# ============================================================
+# NETWORKS — isolated bridge network với IP tĩnh
+# Các container giao tiếp qua tên service (DNS nội bộ Docker)
+# ============================================================
+networks:
+  cicd-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${SUBNET:-172.20.0.0/24}
+    driver_opts:
+      com.docker.network.bridge.name: br-cicd
