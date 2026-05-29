@@ -67,3 +67,5 @@ frontend/dist/
 
 deploy.json
 nodes/cicd/data/*
+
+digest.txt

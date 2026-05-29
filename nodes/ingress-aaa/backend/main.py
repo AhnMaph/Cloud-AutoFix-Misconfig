@@ -14,7 +14,9 @@ from providers.aws import terraform_aws_deploy, create_tenant_iam_role
 try:
     from providers.openstack import create_tenant_project
 except Exception:
-    create_tenant_project = Nonefrom policy.engine import resolve_provider
+    create_tenant_project = None
+
+from policy.engine import resolve_provider
     
 from template_generator import generate_template
 from tenants import (
@@ -750,10 +752,10 @@ def deploy(
     provider = resolve_provider(req.resource_type)
     
     if provider == "openstack" and not OPENSTACK_ENABLED:
-    raise HTTPException(
-        status_code=503,
-        detail="OpenStack provider is temporarily disabled"
-    )
+        raise HTTPException(
+            status_code=503,
+            detail="OpenStack provider is temporarily disabled"
+        )
 
     # Generate .tf file từ Jinja2 template
     context = {

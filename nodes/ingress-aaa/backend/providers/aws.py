@@ -81,16 +81,18 @@ def create_tenant_iam_role(tenant_id: str, aws_account_id: str) -> dict:
                 "Action": [
                     "s3:CreateBucket",
                     "s3:DeleteBucket",
-                    "s3:GetBucketLocation",
-                    "s3:GetBucketVersioning",
-                    "s3:PutBucketVersioning",
-                    "s3:GetBucketEncryption",
-                    "s3:PutEncryptionConfiguration",
-                    "s3:GetBucketPublicAccessBlock",
-                    "s3:PutBucketPublicAccessBlock",
-                    "s3:GetBucketTagging",
-                    "s3:PutBucketTagging",
-                    "s3:ListBucket"
+                    "s3:ListBucket",
+
+                    # Terraform AWS provider thường read nhiều bucket subresources
+                    "s3:GetBucket*",
+                    "s3:Get*Configuration",
+                    "s3:GetReplicationConfiguration",
+
+                    # Các quyền write config mà template đang quản lý
+                    "s3:PutBucket*",
+                    "s3:DeleteBucket*",
+                    "s3:Put*Configuration",
+                    "s3:Delete*Configuration"
                 ],
                 "Resource": [
                     f"arn:aws:s3:::{bucket_prefix}*"
@@ -102,7 +104,9 @@ def create_tenant_iam_role(tenant_id: str, aws_account_id: str) -> dict:
                 "Action": [
                     "s3:GetObject",
                     "s3:PutObject",
-                    "s3:DeleteObject"
+                    "s3:DeleteObject",
+                    "s3:AbortMultipartUpload",
+                    "s3:ListMultipartUploadParts"
                 ],
                 "Resource": [
                     f"arn:aws:s3:::{bucket_prefix}*/*"

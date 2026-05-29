@@ -7,3 +7,4 @@ pydantic
 PyJWT[crypto]
 jinja2
 boto3
+PyYAML
