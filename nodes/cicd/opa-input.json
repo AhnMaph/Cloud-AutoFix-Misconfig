@@ -1,0 +1,13 @@
+{
+  "input": {
+    "commit": "5bcd0309b788b6169efd6fcd5a5d48a70646467b",
+    "repo": "gitea-admin/aws-infrastructure-iac",
+    "metrics": {
+      "checkov_total_failed": 20,
+      "tfsec_critical": 3,
+      "tfsec_high": 8,
+      "trivy_critical": 1,
+      "trivy_high": 8
+    }
+  }
+}

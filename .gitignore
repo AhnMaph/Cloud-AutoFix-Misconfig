@@ -66,3 +66,4 @@ frontend/node_modules/
 frontend/dist/
 
 deploy.json
+nodes/cicd/data/*

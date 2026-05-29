@@ -1,0 +1,125 @@
+when:
+  event: [push, pull_request]
+
+steps:
+
+  # ── Step 1: Checkov scan ──────────────────────────────────
+  - name: checkov-scan
+    image: bridgecrew/checkov:latest
+    commands:
+      - "checkov -d . --framework terraform --output json --soft-fail > checkov-results.json"
+      - "echo 'Checkov scan completed'"
+      - "cat checkov-results.json"
+
+  # ── Step 2: tfsec scan ───────────────────────────────────
+  - name: tfsec-scan
+    image: aquasec/tfsec:latest
+    commands:
+      - "tfsec . --format json --no-colour --soft-fail --out tfsec-results.json"
+      - "echo 'tfsec scan completed'"
+      - "cat tfsec-results.json"
+
+  # ── Step 3: Trivy scan ───────────────────────────────────
+  - name: trivy-scan
+    image: aquasec/trivy:latest
+    commands:
+      - "trivy config . --format json --output trivy-results.json --exit-code 0"
+      - "echo 'Trivy scan completed'"
+      - "cat trivy-results.json"
+  - name: normalize-scan
+    image: bridgecrew/checkov:latest # Dùng image chứa nhiều tool hoặc cài thêm python
+    commands:      
+      # 1. Chạy Python Normalize gộp chung vào 1 file 'normalized-results.json'
+      - python3 normalize_alerts.py --tool tfsec --input tfsec-results.json --output normalized-results.json
+      - python3 normalize_alerts.py --tool checkov --input checkov-results.json --output normalized-results.json
+      - python3 normalize_alerts.py --tool trivy --input trivy-results.json --output normalized-results.json
+# ── Step 4: Tạo cấu trúc đếm lỗi đúng chuẩn và POST sang OPA ──────────
+  - name: opa-evaluate
+    image: badouralix/curl-jq:latest
+    commands:
+      - "echo 'Gom số liệu đếm gửi sang OPA...'"
+      - >
+        jq -n
+        --slurpfile checkov checkov-results.json
+        --slurpfile tfsec tfsec-results.json
+        --slurpfile trivy trivy-results.json
+        '{
+          input: {
+            commit: "'${CI_COMMIT_SHA}'",
+            repo: "'${CI_REPO}'",
+            metrics: {
+              checkov_total_failed: ($checkov[0].summary.failed // 0),
+              tfsec_critical: ([ $tfsec[0].results[]? | select(.severity == "CRITICAL" or .severity == "critical") ] | length),
+              tfsec_high: ([ $tfsec[0].results[]? | select(.severity == "HIGH" or .severity == "high") ] | length),
+              trivy_critical: ([ $trivy[0].Results[]? | .Misconfigurations[]? | select(.Severity == "CRITICAL") ] | length),
+              trivy_high: ([ $trivy[0].Results[]? | .Misconfigurations[]? | select(.Severity == "HIGH") ] | length)
+            }
+          }
+        }' > opa-input.json
+        
+      - "echo 'Gửi yêu cầu đánh giá sang OPA...'"
+      - >
+        curl -s -X POST http://172.20.0.13:8181/v1/data/aws/iac
+        -H "Content-Type: application/json"
+        -d @opa-input.json > opa-response.json
+        
+      - "cat opa-response.json"
+      - "cat opa-input.json"
+
+# ── Step 5: Đếm tổng hợp số liệu lỗi (Metrics) và đẩy lên ELK ────────
+  - name: log-to-elk
+    image: badouralix/curl-jq:latest
+    when:
+      status: [success, failure]
+    commands:
+      - "echo 'Calculating security metrics and parsing OPA...'"
+      
+      # Tạo file payload chứa các số liệu đếm sẵn (Metrics)
+      - >
+        jq -n
+        --slurpfile checkov checkov-results.json
+        --slurpfile tfsec tfsec-results.json
+        --slurpfile trivy trivy-results.json
+        --slurpfile opa_res opa-response.json
+        '{
+          pipeline: "iac-scan",
+          commit: "'${CI_COMMIT_SHA}'",
+          repo: "'${CI_REPO}'",
+          status: "'${CI_PIPELINE_STATUS}'",
+          timestamp: (now | strflocaltime("%Y-%m-%dT%H:%M:%SZ")),
+
+          metrics: {
+            checkov_total_failed: ($checkov[0].summary.failed // 0),
+            checkov_total_passed: ($checkov[0].summary.passed // 0),
+            tfsec_total: ($tfsec[0].results // [] | length),
+            tfsec_critical: ([ $tfsec[0].results[]? | select(.severity == "CRITICAL" or .severity == "critical") ] | length),
+            tfsec_high: ([ $tfsec[0].results[]? | select(.severity == "HIGH" or .severity == "high") ] | length),
+            trivy_total: ([ $trivy[0].Results[]? | .Misconfigurations[]? ] | length),
+            trivy_critical: ([ $trivy[0].Results[]? | .Misconfigurations[]? | select(.Severity == "CRITICAL") ] | length),
+            trivy_high: ([ $trivy[0].Results[]? | .Misconfigurations[]? | select(.Severity == "HIGH") ] | length)
+          },
+
+          # ⚖️ SỬA LẠI KHỐI NÀY: Tự động tính toán dựa trên kết quả thực tế của OPA
+          opa_policy: {
+            # Nếu OPA có trả về lỗi trong deny (chiều dài object/mảng > 0) thì is_allowed = false
+            is_allowed: (($opa_res[0].result.deny // {} | length) == 0),
+            
+            # Đếm số lượng luật bị vi phạm trong block deny
+            violations_count: ($opa_res[0].result.deny // {} | length),
+            
+            # Lấy danh sách các câu lệnh chặn (Nếu OPA trả về Object dạng {"msg1":"", "msg2":""}, ta lấy các key của nó làm lý do)
+            deny_reasons: (
+              if ($opa_res[0].result.deny | type) == "object" then
+                ($opa_res[0].result.deny | keys)
+              else
+                ($opa_res[0].result.deny // [])
+              end
+            )
+          }
+        }' > elk-metrics-payload.json
+
+      - "echo 'Sending clean metrics to ELK Logstash...'"
+      - >
+        curl --fail -s -X POST http://192.168.154.129:5055
+        -H "Content-Type: application/json"
+        -d @elk-metrics-payload.json
