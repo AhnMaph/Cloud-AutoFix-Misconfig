@@ -17,8 +17,8 @@ services:
     environment:
       - USER_UID=1000
       - USER_GID=1000
-      - GITEA__server__DOMAIN=${GITEA_DOMAIN:-192.168.154.129}
-      - GITEA__server__ROOT_URL=${GITEA_ROOT_URL:-http://192.168.154.129:3000}
+      - GITEA__server__DOMAIN=${GITEA_DOMAIN:-${VM1_IP}}
+      - GITEA__server__ROOT_URL=${GITEA_ROOT_URL:-http://${VM1_IP}:3000}
       - GITEA__server__HTTP_PORT=3000
       - GITEA__server__SSH_PORT=2222
       - GITEA__server__SSH_LISTEN_PORT=22
@@ -75,14 +75,14 @@ services:
         condition: service_healthy
     environment:
       # URL công khai của Woodpecker (phải khớp với OAuth callback)
-      - WOODPECKER_HOST=${WOODPECKER_HOST:-http://192.168.154.129:8000}
+      - WOODPECKER_HOST=${WOODPECKER_HOST:-http://${VM1_IP}:8000}
       - WOODPECKER_SERVER_ADDR=:8000
       - WOODPECKER_GRPC_ADDR=:9000
       # Secret xác thực server <-> agent
       - WOODPECKER_AGENT_SECRET=${WOODPECKER_AGENT_SECRET}
       # Gitea OAuth2 integration
       - WOODPECKER_GITEA=true
-      - WOODPECKER_GITEA_URL=${GITEA_ROOT_URL:-http://192.168.154.129:3000}
+      - WOODPECKER_GITEA_URL=${GITEA_ROOT_URL:-http://${VM1_IP}:3000}
       - WOODPECKER_GITEA_SERVER=http://gitea:3000
       - WOODPECKER_GITEA_CLIENT=${WOODPECKER_GITEA_CLIENT}
       - WOODPECKER_GITEA_SECRET=${WOODPECKER_GITEA_SECRET}
