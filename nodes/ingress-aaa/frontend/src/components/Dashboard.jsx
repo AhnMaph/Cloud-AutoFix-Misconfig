@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { styles } from "../styles";
 import { RESOURCE_TYPES } from "../constants/resources";
 import ResourceForm from "./ResourceForm";
@@ -13,12 +13,16 @@ export default function Dashboard({ me, onLogout }) {
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
 
+  const pollRef = useRef(null);
+  const pollTimeoutRef = useRef(null);
+
   async function fetchLatestDeployment() {
     try {
       const res = await api.get("/deployments/latest");
+      const item = res.data.item || null;
 
-      setDeployment(res.data.item || null);
-      return res.data.item || null;
+      setDeployment(item);
+      return item;
     } catch (err) {
       console.error(
         "Fetch latest deployment failed:",
@@ -28,23 +32,48 @@ export default function Dashboard({ me, onLogout }) {
     }
   }
 
+  function stopDeploymentPolling() {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+
+    if (pollTimeoutRef.current) {
+      clearTimeout(pollTimeoutRef.current);
+      pollTimeoutRef.current = null;
+    }
+  }
+
   function startDeploymentPolling() {
-    const poll = setInterval(async () => {
+    stopDeploymentPolling();
+
+    const activeStatuses = [
+      "submitted",
+      "scanning",
+      "deploying",
+      "user_requested_fix",
+      "autofix_merged",
+    ];
+
+    pollRef.current = setInterval(async () => {
       const item = await fetchLatestDeployment();
 
-      if (
-        item &&
-        !["submitted", "scanning", "deploying"].includes(item.status)
-      ) {
-        clearInterval(poll);
+      if (item && !activeStatuses.includes(item.status)) {
+        stopDeploymentPolling();
       }
     }, 5000);
 
-    setTimeout(() => clearInterval(poll), 90000);
+    pollTimeoutRef.current = setTimeout(() => {
+      stopDeploymentPolling();
+    }, 180000);
   }
 
   useEffect(() => {
     fetchLatestDeployment();
+
+    return () => {
+      stopDeploymentPolling();
+    };
   }, []);
 
   async function handleSubmit(formData, action) {
@@ -76,24 +105,56 @@ export default function Dashboard({ me, onLogout }) {
   async function requestFix(id) {
     try {
       setError(null);
+      setLoading(true);
+
+      // Optimistic UI: hiện trạng thái chờ ngay sau khi bấm nút
+      setDeployment((prev) =>
+        prev
+          ? {
+              ...prev,
+              status: "user_requested_fix",
+              user_decision: "request_fix",
+              recommendation:
+                "User accepted auto-fix. Waiting for remediation workflow and CI/CD callback...",
+            }
+          : prev
+      );
 
       const res = await api.post(`/deployments/${id}/request-fix`, {});
 
       setDeployment(res.data.deployment);
+
+      // Sau khi backend nhận request-fix, tiếp tục polling để chờ pipeline callback
+      startDeploymentPolling();
     } catch (err) {
-      setError(err.response?.data?.detail || err.message);
+      const detail = err.response?.data?.detail;
+
+      if (typeof detail === "string") {
+        setError(detail);
+      } else {
+        setError(detail?.message || detail?.error || err.message);
+      }
+
+      // Fetch lại để UI không bị kẹt trạng thái optimistic nếu request lỗi
+      await fetchLatestDeployment();
+    } finally {
+      setLoading(false);
     }
   }
 
   async function denyDeployment(id) {
     try {
       setError(null);
+      setLoading(true);
 
       const res = await api.post(`/deployments/${id}/deny`, {});
 
       setDeployment(res.data.deployment);
+      stopDeploymentPolling();
     } catch (err) {
       setError(err.response?.data?.detail || err.message);
+    } finally {
+      setLoading(false);
     }
   }
 
@@ -102,17 +163,30 @@ export default function Dashboard({ me, onLogout }) {
       setError(null);
       setLoading(true);
 
+      setDeployment((prev) =>
+        prev
+          ? {
+              ...prev,
+              status: "deploying",
+              recommendation: "User accepted deployment. Terraform is running...",
+            }
+          : prev
+      );
+
       const res = await api.post(`/deployments/${id}/accept`, {});
 
       setDeployment(res.data.deployment);
+      startDeploymentPolling();
     } catch (err) {
       const detail = err.response?.data?.detail;
 
       if (typeof detail === "string") {
         setError(detail);
       } else {
-        setError(detail?.message || err.message);
+        setError(detail?.message || detail?.error || err.message);
       }
+
+      await fetchLatestDeployment();
     } finally {
       setLoading(false);
     }
@@ -125,11 +199,13 @@ export default function Dashboard({ me, onLogout }) {
   }
 
   const summary = deployment?.fix_report?.summary;
+  const hasAutoFix =
+    deployment?.status === "needs_user_fix_decision" &&
+    Number(summary?.fixed || 0) > 0;
 
   return (
     <div style={styles.dashboard}>
       <div style={styles.dashboardCard}>
-        {/* Header */}
         <div style={styles.dashHeader}>
           <div>
             <div style={styles.logo}>Hybrid Cloud Portal</div>
@@ -145,7 +221,6 @@ export default function Dashboard({ me, onLogout }) {
 
         <div style={styles.badge}>● ONLINE</div>
 
-        {/* User info */}
         <div style={{ marginTop: "20px" }}>
           {[
             ["Username", me?.username],
@@ -158,7 +233,6 @@ export default function Dashboard({ me, onLogout }) {
           ))}
         </div>
 
-        {/* Resource buttons */}
         <div style={{ marginTop: "24px", marginBottom: "8px" }}>
           <span
             style={{
@@ -194,7 +268,6 @@ export default function Dashboard({ me, onLogout }) {
           />
         )}
 
-        {/* Deployment Security Review */}
         {deployment && (
           <div style={reviewPanelStyle}>
             <div style={reviewHeaderStyle}>
@@ -263,7 +336,9 @@ export default function Dashboard({ me, onLogout }) {
 
             {deployment.recommendation && (
               <div style={recommendationBoxStyle}>
-                <div style={recommendationLabelStyle}>Scanner recommendation</div>
+                <div style={recommendationLabelStyle}>
+                  Scanner recommendation
+                </div>
                 <MarkdownContent className="markdown-content--compact">
                   {deployment.recommendation}
                 </MarkdownContent>
@@ -300,19 +375,41 @@ export default function Dashboard({ me, onLogout }) {
             </div>
 
             <div style={{ display: "flex", gap: "10px", marginTop: "14px" }}>
-              {["blocked_by_policy", "needs_user_fix_decision"].includes(
-                deployment.status
-              ) && (
+              {deployment.status === "needs_user_fix_decision" && (
                 <>
                   <button
                     style={buttonStyle("#f97316")}
                     onClick={() => requestFix(deployment.deployment_id)}
                     disabled={loading}
                   >
-                    {deployment.status === "needs_user_fix_decision"
-                      ? "Accept Auto-Fix"
-                      : "Request Fix"}
+                    {loading ? "Processing..." : "Accept Auto-Fix"}
                   </button>
+
+                  <button
+                    style={buttonStyle("#475569")}
+                    onClick={() => denyDeployment(deployment.deployment_id)}
+                    disabled={loading}
+                  >
+                    Cancel
+                  </button>
+                </>
+              )}
+
+              {deployment.status === "blocked_by_policy" && (
+                <>
+                  {hasAutoFix ? (
+                    <button
+                      style={buttonStyle("#f97316")}
+                      onClick={() => requestFix(deployment.deployment_id)}
+                      disabled={loading}
+                    >
+                      {loading ? "Processing..." : "Accept Auto-Fix"}
+                    </button>
+                  ) : (
+                    <span style={statusTextStyle("#ef4444")}>
+                      No auto-fix is available. Manual template hardening is required.
+                    </span>
+                  )}
 
                   <button
                     style={buttonStyle("#475569")}
@@ -331,7 +428,7 @@ export default function Dashboard({ me, onLogout }) {
                     onClick={() => acceptDeploy(deployment.deployment_id)}
                     disabled={loading}
                   >
-                    Accept Deploy
+                    {loading ? "Deploying..." : "Accept Deploy"}
                   </button>
 
                   <button
@@ -358,7 +455,19 @@ export default function Dashboard({ me, onLogout }) {
 
               {deployment.status === "user_requested_fix" && (
                 <span style={statusTextStyle("#facc15")}>
-                  User requested fix. Waiting for remediation workflow.
+                  User accepted auto-fix. Waiting for remediation workflow and CI/CD callback...
+                </span>
+              )}
+
+              {deployment.status === "autofix_merged" && (
+                <span style={statusTextStyle("#22c55e")}>
+                  Auto-fix PR merged. Waiting for CI/CD scan to run again...
+                </span>
+              )}
+
+              {deployment.status === "autofix_failed" && (
+                <span style={statusTextStyle("#ef4444")}>
+                  Auto-fix failed. Please review the PR manually in Gitea.
                 </span>
               )}
 
@@ -391,31 +500,27 @@ export default function Dashboard({ me, onLogout }) {
                   Terraform apply failed.
                 </span>
               )}
+
+              <button
+                style={buttonStyle("#334155")}
+                onClick={fetchLatestDeployment}
+                disabled={loading}
+              >
+                Refresh Status
+              </button>
             </div>
 
+            {deployment.autofix_error && (
+              <pre style={errorOutputStyle}>{deployment.autofix_error}</pre>
+            )}
+
             {deployment.apply_error && (
-              <pre
-                style={{
-                  whiteSpace: "pre-wrap",
-                  maxHeight: "240px",
-                  overflow: "auto",
-                  background: "#1f1111",
-                  padding: "12px",
-                  borderRadius: "8px",
-                  color: "#fecaca",
-                  fontSize: "12px",
-                  lineHeight: "1.5",
-                  marginTop: "12px",
-                }}
-              >
-                {deployment.apply_error}
-              </pre>
+              <pre style={errorOutputStyle}>{deployment.apply_error}</pre>
             )}
           </div>
         )}
       </div>
 
-      {/* Modal */}
       {activeResource && (
         <ResourceForm
           resource={activeResource}
@@ -495,6 +600,19 @@ const scanReportBoxStyle = {
   padding: "14px 16px",
 };
 
+const errorOutputStyle = {
+  whiteSpace: "pre-wrap",
+  maxHeight: "240px",
+  overflow: "auto",
+  background: "#1f1111",
+  padding: "12px",
+  borderRadius: "8px",
+  color: "#fecaca",
+  fontSize: "12px",
+  lineHeight: "1.5",
+  marginTop: "12px",
+};
+
 function SummaryBox({ label, value }) {
   return (
     <div
@@ -546,6 +664,10 @@ function getStatusColor(status) {
       return "#facc15";
     case "user_requested_fix":
       return "#facc15";
+    case "autofix_merged":
+      return "#22c55e";
+    case "autofix_failed":
+      return "#ef4444";
     case "user_denied":
       return "#94a3b8";
     case "deploying":

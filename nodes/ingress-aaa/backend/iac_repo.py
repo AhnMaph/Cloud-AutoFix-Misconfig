@@ -668,3 +668,282 @@ def template_dir_for_provider(provider: str) -> Path:
         return Path(required_env("IAC_TEMPLATE_DIR_OPENSTACK"))
 
     raise RuntimeError(f"Unsupported provider: {provider}")
+
+def split_repo_full_name(repo_full_name: str) -> tuple[str, str]:
+    """
+    Input:
+      gitea-admin/t-hehehehe_aws
+
+    Output:
+      owner = gitea-admin
+      repo  = t-hehehehe_aws
+    """
+    if not repo_full_name or "/" not in repo_full_name:
+        raise RuntimeError(f"Invalid repo full name: {repo_full_name}")
+
+    owner, repo = repo_full_name.split("/", 1)
+
+    if not owner or not repo:
+        raise RuntimeError(f"Invalid repo full name: {repo_full_name}")
+
+    return owner, repo
+
+
+def list_open_gitea_pulls(repo_full_name: str) -> list[dict]:
+    owner, repo = split_repo_full_name(repo_full_name)
+
+    url = f"{gitea_base_url()}/api/v1/repos/{owner}/{repo}/pulls"
+
+    r = requests.get(
+        url,
+        headers=gitea_headers(),
+        params={
+            "state": "open",
+            "sort": "recentupdate",
+        },
+        timeout=20,
+    )
+
+    if r.status_code != 200:
+        raise RuntimeError(
+            f"Cannot list pull requests for {repo_full_name}: {r.status_code} {r.text}"
+        )
+
+    return r.json()
+
+
+def find_autofix_pr_for_deployment(repo_full_name: str, deployment_id: str) -> dict:
+    """
+    Tìm PR auto-fix mới nhất.
+
+    Ưu tiên:
+      1. PR title/body có deployment_id
+      2. PR head branch có chứa autofix
+      3. PR title có Auto-Fix / autofix / fix
+    """
+    pulls = list_open_gitea_pulls(repo_full_name)
+
+    if not pulls:
+        raise RuntimeError(f"No open pull request found in {repo_full_name}")
+
+    # 1. Match deployment_id trong title/body/head branch nếu có.
+    for pr in pulls:
+        title = pr.get("title", "") or ""
+        body = pr.get("body", "") or ""
+        head = pr.get("head", {}) or {}
+        head_branch = head.get("ref", "") or ""
+
+        haystack = f"{title}\n{body}\n{head_branch}".lower()
+
+        if deployment_id.lower() in haystack:
+            return pr
+
+    # 2. Match branch autofix/*
+    for pr in pulls:
+        head = pr.get("head", {}) or {}
+        head_branch = (head.get("ref", "") or "").lower()
+
+        if "autofix" in head_branch:
+            return pr
+
+    # 3. Match title/body auto-fix
+    for pr in pulls:
+        title = (pr.get("title", "") or "").lower()
+        body = (pr.get("body", "") or "").lower()
+
+        if "auto-fix" in title or "autofix" in title or "auto fix" in title:
+            return pr
+
+        if "auto-fix" in body or "autofix" in body or "auto fix" in body:
+            return pr
+
+    raise RuntimeError(
+        f"No matching auto-fix pull request found for deployment {deployment_id}"
+    )
+
+
+def get_gitea_pull_request(repo_full_name: str, pr_index: int) -> dict:
+    owner, repo = split_repo_full_name(repo_full_name)
+
+    url = f"{gitea_base_url()}/api/v1/repos/{owner}/{repo}/pulls/{pr_index}"
+
+    r = requests.get(
+        url,
+        headers=gitea_headers(),
+        timeout=20,
+    )
+
+    if r.status_code != 200:
+        raise RuntimeError(
+            f"Cannot get PR #{pr_index} in {repo_full_name}: {r.status_code} {r.text}"
+        )
+
+    return r.json()
+
+
+def merge_gitea_pull_request(repo_full_name: str, pr_index: int) -> dict:
+    owner, repo = split_repo_full_name(repo_full_name)
+
+    url = f"{gitea_base_url()}/api/v1/repos/{owner}/{repo}/pulls/{pr_index}/merge"
+
+    payload = {
+        "Do": "merge",
+        "MergeTitleField": f"Merge auto-fix PR #{pr_index}",
+        "MergeMessageField": "Merged by Hybrid Cloud Portal after user accepted auto-fix.",
+    }
+
+    last_status = None
+    last_text = ""
+
+    # Gitea đôi khi trả 405 "Please try again later" khi đang check mergeability.
+    # Retry tối đa khoảng 60 giây.
+    for attempt in range(1, 13):
+        r = requests.post(
+            url,
+            headers=gitea_headers(),
+            json=payload,
+            timeout=30,
+        )
+
+        last_status = r.status_code
+        last_text = r.text or ""
+
+        if r.status_code in [200, 201, 204]:
+            try:
+                return r.json()
+            except Exception:
+                return {
+                    "merged": True,
+                    "status_code": r.status_code,
+                    "attempt": attempt,
+                }
+
+        retryable = (
+            r.status_code == 405
+            and (
+                "try again later" in last_text.lower()
+                or "please try again" in last_text.lower()
+            )
+        )
+
+        if retryable:
+            time.sleep(5)
+            continue
+
+        # Không retry các lỗi khác: conflict, forbidden, invalid merge method, v.v.
+        break
+
+    pr_info = {}
+    try:
+        pr = get_gitea_pull_request(repo_full_name, pr_index)
+        pr_info = {
+            "number": pr.get("number") or pr.get("index"),
+            "title": pr.get("title"),
+            "state": pr.get("state"),
+            "merged": pr.get("merged"),
+            "mergeable": pr.get("mergeable"),
+            "draft": pr.get("draft"),
+            "html_url": pr.get("html_url"),
+            "head": (pr.get("head") or {}).get("ref"),
+            "head_sha": (pr.get("head") or {}).get("sha"),
+            "base": (pr.get("base") or {}).get("ref"),
+        }
+    except Exception as e:
+        pr_info = {
+            "pr_info_error": str(e)
+        }
+
+    raise RuntimeError(
+        f"Cannot merge PR #{pr_index} in {repo_full_name}: "
+        f"{last_status} {last_text}. PR info: {pr_info}"
+    )
+
+
+def accept_autofix_for_deployment(repo_full_name: str, deployment_id: str) -> dict:
+    """
+    User bấm Accept Auto-Fix:
+      - tìm PR auto-fix
+      - merge PR vào main
+      - trả metadata cho deployment record
+    """
+    pr = find_autofix_pr_for_deployment(repo_full_name, deployment_id)
+
+    pr_index = pr.get("number") or pr.get("index")
+    if not pr_index:
+        raise RuntimeError(f"Cannot determine PR index: {pr}")
+
+    merge_result = merge_gitea_pull_request(repo_full_name, int(pr_index))
+
+    return {
+        "pr_number": pr_index,
+        "pr_title": pr.get("title"),
+        "pr_url": pr.get("html_url") or pr.get("url"),
+        "merge_result": merge_result,
+    }
+    
+def prepare_deployment_workdir(deployment: dict) -> Path:
+    """
+    Clone đúng tenant repo + checkout đúng commit đã được CI/CD scan,
+    sau đó trả về folder Terraform workdir, ví dụ:
+      /app/tfstate/deployments/dep-xxxx/repo/vm
+      /app/tfstate/deployments/dep-xxxx/repo/object_storage
+    """
+    repo_full_name = deployment.get("repo")
+    commit = deployment.get("commit")
+    tf_workdir = deployment.get("tf_workdir")
+    deployment_id = deployment.get("deployment_id")
+
+    if not repo_full_name:
+        raise RuntimeError("Deployment missing repo")
+
+    if not commit:
+        raise RuntimeError("Deployment missing commit")
+
+    if not tf_workdir:
+        raise RuntimeError("Deployment missing tf_workdir")
+
+    if not deployment_id:
+        raise RuntimeError("Deployment missing deployment_id")
+
+    tf_rel = Path(tf_workdir)
+
+    if tf_rel.is_absolute() or ".." in tf_rel.parts:
+        raise RuntimeError(f"Invalid tf_workdir: {tf_workdir}")
+
+    owner, repo = split_repo_full_name(repo_full_name)
+
+    username = required_env("GITEA_USERNAME")
+    token = gitea_token()
+    base = gitea_base_url()
+
+    clone_url = build_clone_url(
+        gitea_url=base,
+        owner=owner,
+        repo=repo,
+        username=username,
+        token=token,
+    )
+
+    state_root = Path(os.getenv("TERRAFORM_STATE_ROOT", "/app/tfstate"))
+    deploy_root = state_root / "deployments" / deployment_id
+
+    if deploy_root.exists():
+        shutil.rmtree(deploy_root, ignore_errors=True)
+
+    deploy_root.mkdir(parents=True, exist_ok=True)
+
+    run_cmd(["git", "clone", clone_url, "repo"], cwd=deploy_root, timeout=300)
+
+    repo_dir = deploy_root / "repo"
+
+    run_cmd(["git", "checkout", commit], cwd=repo_dir, timeout=120)
+
+    workdir = repo_dir / tf_rel
+
+    if not workdir.exists():
+        raise RuntimeError(f"Terraform workdir not found: {tf_workdir}")
+
+    if not (workdir / "main.tf").exists():
+        raise RuntimeError(f"main.tf not found in Terraform workdir: {tf_workdir}")
+
+    return workdir

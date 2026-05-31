@@ -38,7 +38,11 @@ from tenants import (
 )
 
 import uuid
-from iac_repo import push_iac_request_to_gitea
+from iac_repo import (
+    push_iac_request_to_gitea,
+    accept_autofix_for_deployment,
+    prepare_deployment_workdir,
+)
 from deployments import (
     create_deployment,
     update_deployment,
@@ -994,10 +998,18 @@ def receive_opa_result(
     fix_report = req.fix_report or {}
     summary = fix_report.get("summary", {})
 
+    total = int(summary.get("total", 0) or 0)
     fixed = int(summary.get("fixed", 0) or 0)
     manual = int(summary.get("manual", 0) or 0)
     failed = int(summary.get("failed", 0) or 0)
     skipped = int(summary.get("skipped", 0) or 0)
+
+    # Defensive guard:
+    # Nếu scanner report không có finding nào thì không được block deployment.
+    # Trường hợp này thường xảy ra khi OPA response bị missing/malformed
+    # nhưng notify-ingress fallback deny=true.
+    if total == 0 and fixed == 0 and manual == 0 and failed == 0 and skipped == 0:
+        deny = False
 
     if deny:
         if fixed > 0:
@@ -1095,18 +1107,67 @@ def request_fix_deployment(
             detail="Deployment is not denied by policy"
         )
 
-    updated = update_deployment(
-        deployment_id,
-        {
-            "status": "user_requested_fix",
-            "user_decision": "request_fix",
-        },
-    )
+    if deployment.get("status") not in [
+        "needs_user_fix_decision",
+        "blocked_by_policy",
+        "user_requested_fix",
+    ]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Deployment is not waiting for auto-fix decision. Current status: {deployment.get('status')}"
+        )
 
-    return {
-        "status": "user_requested_fix",
-        "deployment": updated,
-    }
+    repo_full_name = deployment.get("repo")
+    if not repo_full_name:
+        raise HTTPException(
+            status_code=400,
+            detail="Deployment has no repository information"
+        )
+
+    try:
+        autofix_result = accept_autofix_for_deployment(
+            repo_full_name=repo_full_name,
+            deployment_id=deployment_id,
+        )
+
+        updated = update_deployment(
+            deployment_id,
+            {
+                "status": "autofix_merged",
+                "user_decision": "accept_autofix",
+                "autofix": autofix_result,
+                "recommendation": (
+                    "Auto-fix PR was merged. Waiting for the next CI/CD scan result. "
+                    "If policy passes, deployment will move to waiting_user_approval."
+                ),
+            },
+        )
+
+        return {
+            "status": "autofix_merged",
+            "message": "Auto-fix PR merged successfully. CI/CD will run again from the merge commit.",
+            "deployment": updated,
+        }
+
+    except Exception as e:
+        updated = update_deployment(
+            deployment_id,
+            {
+                "status": "autofix_failed",
+                "user_decision": "accept_autofix",
+                "autofix_error": str(e),
+                "recommendation": "Auto-fix merge failed. Please review the PR manually in Gitea.",
+            },
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Auto-fix merge failed",
+                "error": str(e),
+                "deployment": updated,
+            },
+        )
 
 
 @app.post("/deployments/{deployment_id}/deny")
@@ -1135,3 +1196,110 @@ def deny_deployment(
         "status": "user_denied",
         "deployment": updated,
     }
+    
+@app.post("/deployments/{deployment_id}/accept")
+def accept_deployment(
+    deployment_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    tenant_id = extract_tenant_id(current_user)
+    deployment = get_deployment(deployment_id)
+
+    if not deployment:
+        raise HTTPException(status_code=404, detail="Deployment not found")
+
+    if deployment.get("tenant_id") != tenant_id:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    if deployment.get("status") != "waiting_user_approval":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Deployment is not waiting for approval. Current status: {deployment.get('status')}",
+        )
+
+    if deployment.get("opa", {}).get("deny", True):
+        raise HTTPException(
+            status_code=400,
+            detail="OPA denied this deployment. Cannot apply.",
+        )
+
+    update_deployment(
+        deployment_id,
+        {
+            "status": "deploying",
+            "user_decision": "accept_deploy",
+            "recommendation": "User accepted deployment. Terraform is running...",
+        },
+    )
+
+    try:
+        provider = deployment.get("provider")
+        action = deployment.get("action", "plan")
+        resource_type = deployment.get("resource_type")
+        region = deployment.get("region")
+
+        # Quan trọng: clone đúng repo/commit đã scan và lấy đúng tf_workdir.
+        workdir = prepare_deployment_workdir(deployment)
+
+        if provider == "aws":
+            result = terraform_aws_deploy(
+                tenant_id=tenant_id,
+                aws_region=region,
+                action=action,
+                workdir=workdir,
+            )
+
+        elif provider == "openstack":
+            if terraform_openstack_deploy is None:
+                raise RuntimeError("OpenStack deploy function is not available")
+
+            # Đảm bảo OpenStack project tenant tồn tại.
+            if create_tenant_project:
+                create_tenant_project(tenant_id)
+
+            result = terraform_openstack_deploy(
+                tenant_id=tenant_id,
+                resource_type=resource_type,
+                action=action,
+                workdir=workdir,
+            )
+
+        else:
+            raise RuntimeError(f"Unsupported provider: {provider}")
+
+        final_status = result.get("status") or (
+            "applied" if action == "apply" else "planned"
+        )
+
+        updated = update_deployment(
+            deployment_id,
+            {
+                "status": final_status,
+                "terraform_result": result,
+                "recommendation": "Terraform completed successfully.",
+            },
+        )
+
+        return {
+            "status": final_status,
+            "deployment": updated,
+        }
+
+    except Exception as e:
+        updated = update_deployment(
+            deployment_id,
+            {
+                "status": "apply_failed",
+                "apply_error": str(e),
+                "recommendation": "Terraform deployment failed.",
+            },
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Terraform deployment failed",
+                "error": str(e),
+                "deployment": updated,
+            },
+        )

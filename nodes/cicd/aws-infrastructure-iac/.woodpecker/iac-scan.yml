@@ -9,15 +9,8 @@
 
 when:
   event: [push, pull_request]
-  # Chỉ chạy auto-fix + PR khi push lên main/develop, không phải branch autofix/*
-  # (tránh vòng lặp vô hạn)
   branch:
     exclude: [autofix/*]
-
-variables:
-  # Dùng lại image string ở nhiều chỗ
-  - &python_image  python:3.11-slim
-  - &fix_dir       fix_output
 
 steps:
   # ── Step 1: Checkov scan ──────────────────────────────────────────────────
@@ -50,36 +43,53 @@ steps:
 
   # ── Step 4: IaC Auto-Fix ─────────────────────────────────────────────────
   - name: iac-autofix
-    image: *python_image
+    image: python:3.11-slim
     commands:
       - pip install -q colorama
-      - echo "🛠️ Running IaC Auto-Fix Framework..."
+      - echo "🛠️ Running AWS IaC Auto-Fix Framework..."
       - >
         python .woodpecker/iac-autofix/autofix.py
         --tf-dir .
         --checkov checkov-results.json
-        --tfsec   tfsec-results.json
-        --trivy   trivy-results.json
+        --tfsec tfsec-results.json
+        --trivy trivy-results.json
         --out-dir fix_output
         --severity LOW,MEDIUM
       - cat fix_output/PR_SUMMARY.md
-  
+
   # ── Step 5: OPA policy check ─────────────────────────────────────────────
   - name: opa-policy-check
     image: badouralix/curl-jq:latest
     commands:
-      - curl -i -s http://opa:8181/health || (echo "❌ OPA Server sập nguồn hoặc sai cấu hình mạng!"; exit 1)
+      - curl -i -s http://opa:8181/health || (echo "❌ OPA Server unreachable or wrong Docker network"; exit 1)
       - >
         jq -n --argjson data "$(cat fix_output/fix_report.json)" '{"input": $data}' > managed_input.json
-      # 2. Bắn dữ liệu sang endpoint /main để nhận kết quả rút gọn (allow, deny, summary)
+      - cat managed_input.json
       - >
         curl --fail -s -X POST http://opa:8181/v1/data/aws/iac/main
         -H "Content-Type: application/json"
         -d @managed_input.json > opa-response.json
-      - cat managed_input.json
       - cat opa-response.json
 
-  # ── Step 6: Notify Ingress with OPA decision + scan summary ───────────────
+  # ── Step 6: Create Fix PR ────────────────────────────────────────────────
+  # Chạy trước notify-ingress để dashboard chỉ hiện Accept Auto-Fix khi PR đã tồn tại.
+  - name: create-fix-pr
+    image: alpine:3.19
+    when:
+      event: push
+      status: success
+    environment:
+      GITEA_URL:
+        from_secret: GITEA_URL
+      GITEA_TOKEN:
+        from_secret: GITEA_TOKEN
+    commands:
+      - apk add --no-cache git python3
+      - git config --global --add safe.directory '*'
+      - echo "🚀 Creating AWS auto-fix PR if fixes were applied..."
+      - python3 .woodpecker/iac-autofix/gitea_pr.py --fix-dir fix_output --report-json fix_output/fix_report.json --report-md fix_output/PR_SUMMARY.md
+
+  # ── Step 7: Notify Ingress with OPA decision + scan summary ───────────────
   - name: notify-ingress
     image: badouralix/curl-jq:latest
     when:
@@ -111,16 +121,32 @@ steps:
 
         mkdir -p fix_output
 
-        if [ ! -f opa-response.json ]; then
-          echo '{"result":{"deny":true}}' > opa-response.json
-        fi
-
         if [ ! -f fix_output/fix_report.json ]; then
           echo '{"summary":{"total":0,"fixed":0,"skipped":0,"failed":1,"manual":0,"files_patched":0}}' > fix_output/fix_report.json
         fi
 
         if [ ! -f fix_output/PR_SUMMARY.md ]; then
           echo "# Scan summary unavailable" > fix_output/PR_SUMMARY.md
+        fi
+
+        if [ ! -f opa-response.json ]; then
+          jq -n \
+            --slurpfile fix_report fix_output/fix_report.json \
+            '{
+              result: {
+                deny: (
+                  (($fix_report[0].summary.total // 0) > 0)
+                  or
+                  (($fix_report[0].summary.failed // 0) > 0)
+                ),
+                allow: (
+                  (($fix_report[0].summary.total // 0) == 0)
+                  and
+                  (($fix_report[0].summary.failed // 0) == 0)
+                ),
+                fallback_reason: "opa-response.json missing"
+              }
+            }' > opa-response.json
         fi
 
         jq -n \
@@ -141,7 +167,33 @@ steps:
             tf_workdir: $tf_workdir,
             pipeline_url: $pipeline_url,
             opa: {
-              deny: ($opa_response[0].result.deny // true)
+              deny: (
+                $opa_response[0].result.deny //
+                (
+                  if ($opa_response[0].result.allow? != null)
+                  then (if $opa_response[0].result.allow then false else true end)
+                  else (
+                    (($fix_report[0].summary.total // 0) > 0)
+                    or
+                    (($fix_report[0].summary.failed // 0) > 0)
+                  )
+                  end
+                )
+              ),
+              allow: (
+                $opa_response[0].result.allow //
+                (
+                  if ($opa_response[0].result.deny? != null)
+                  then (if $opa_response[0].result.deny then false else true end)
+                  else (
+                    (($fix_report[0].summary.total // 0) == 0)
+                    and
+                    (($fix_report[0].summary.failed // 0) == 0)
+                  )
+                  end
+                )
+              ),
+              summary: ($opa_response[0].result.summary // {})
             },
             summary_markdown: $summary_markdown,
             fix_report: $fix_report[0]
@@ -155,37 +207,18 @@ steps:
           -H "X-CI-Token: $INGRESS_CALLBACK_TOKEN" \
           -d @ingress-payload.json
 
-        echo "✅ OPA decision + scan summary sent to Ingress"
+        echo "✅ AWS OPA decision + scan summary sent to Ingress"
 
-  # ── Step 7: Log to ELK ───────────────────────────────────────────────────
+  # ── Step 8: Log to ELK ───────────────────────────────────────────────────
   - name: log-to-elk
     image: badouralix/curl-jq:latest
     when:
       status: [success, failure]
     commands:
-      - echo "📤 Sending metrics to ELK Logstash..."
+      - echo "📤 Sending AWS scan metrics to ELK Logstash..."
       - >
         curl --fail -s -X POST http://logstash:5055
         -H "Content-Type: application/json"
         -d @fix_output/fix_report.json
       - cat fix_output/fix_report.json
       - echo "✅ Logs successfully pushed to ELK"
-# ── Step 8: Create Fix PR ─────────────────────────────────────────────────
-  - name: create-fix-pr
-    # Thay thế image cũ bằng image Alpine đã tích hợp sẵn Python3 và Git
-    image: alpine:3.19
-    when:
-      event: push
-      status: success
-    environment:
-      GITEA_URL:
-        from_secret: GITEA_URL
-      GITEA_TOKEN:
-        from_secret: GITEA_TOKEN
-    commands:
-      # Alpine dùng 'apk' cài git và python chỉ mất đúng 1 giây, không cần update mỏi mắt
-      - apk add --no-cache git python3
-      
-      - git config --global --add safe.directory '*'
-      - echo "🚀 Creating fix PR if fixes were applied..."
-      - python3 .woodpecker/iac-autofix/gitea_pr.py --fix-dir fix_output --report-json fix_output/fix_report.json --report-md fix_output/PR_SUMMARY.md

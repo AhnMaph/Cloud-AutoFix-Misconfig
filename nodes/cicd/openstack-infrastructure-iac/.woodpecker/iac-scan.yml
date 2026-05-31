@@ -1,23 +1,10 @@
-# .woodpecker/iac-pipeline.yml
-#
-# Prerequisites (Woodpecker UI → Repo Settings → Secrets):
-#   GITEA_TOKEN  — Personal Access Token với quyền repo:write + issue:write
-#   GITEA_URL    — http://192.168.154.129:3000   (hoặc domain Gitea của bạn)
-#
-# Woodpecker tự inject CI_REPO_OWNER, CI_REPO_NAME, CI_COMMIT_BRANCH
-# vào mọi step — không cần khai báo thêm.
+# .woodpecker/iac-scan.yml
+# OpenStack IaC pipeline: Checkov -> Auto-fix -> OPA -> callback Ingress -> ELK -> PR
 
 when:
   event: [push, pull_request]
-  # Chỉ chạy auto-fix + PR khi push lên main/develop, không phải branch autofix/*
-  # (tránh vòng lặp vô hạn)
   branch:
     exclude: [autofix/*]
-
-variables:
-  # Dùng lại image string ở nhiều chỗ
-  - &python_image  python:3.11-slim
-  - &fix_dir       fix_output
 
 steps:
   # ── Step 1: Checkov scan ──────────────────────────────────────────────────
@@ -30,12 +17,12 @@ steps:
         > checkov-results.json
       - echo "✅ Checkov scan done"
 
-  # ── Step 4: IaC Auto-Fix ─────────────────────────────────────────────────
+  # ── Step 2: OpenStack IaC Auto-Fix ────────────────────────────────────────
   - name: iac-autofix
-    image: *python_image
+    image: python:3.11-slim
     commands:
       - pip install -q colorama
-      - echo "🛠️ Running IaC Auto-Fix Framework..."
+      - echo "🛠️ Running OpenStack IaC Auto-Fix Framework..."
       - >
         python .woodpecker/iac-autofix/autofix.py
         --tf-dir .
@@ -43,15 +30,14 @@ steps:
         --out-dir fix_output
         --severity LOW,MEDIUM
       - cat fix_output/PR_SUMMARY.md
-  # ── Step 5: OPA policy check ─────────────────────────────────────────────
+
+  # ── Step 3: OPA policy check ─────────────────────────────────────────────
   - name: opa-policy-check
     image: badouralix/curl-jq:latest
     commands:
-      - curl -i -s http://opa:8181/health || (echo "❌ OPA Server sập nguồn hoặc sai cấu hình mạng!"; exit 1)
+      - curl -i -s http://opa:8181/health || (echo "❌ OPA Server unreachable or wrong Docker network"; exit 1)
       - >
         jq -n --argjson data "$(cat fix_output/fix_report.json)" '{"input": $data}' > managed_input.json
-      # 2. Bắn dữ liệu sang endpoint /main để nhận kết quả rút gọn (allow, deny, summary)
-      
       - cat managed_input.json
       - >
         curl --fail -s -X POST http://opa:8181/v1/data/openstack/iac/main
@@ -59,22 +45,9 @@ steps:
         -d @managed_input.json > opa-response.json
       - cat opa-response.json
 
-  # ── Step 6: Log to ELK ───────────────────────────────────────────────────
-  - name: log-to-elk
-    image: badouralix/curl-jq:latest
-    when:
-      status: [success, failure]
-    commands:
-      - echo "📤 Sending metrics to ELK Logstash..."
-      - >
-        curl --fail -s -X POST http://logstash:5055
-        -H "Content-Type: application/json"
-        -d @fix_output/fix_report.json
-      - cat fix_output/fix_report.json
-      - echo "✅ Logs successfully pushed to ELK"
-# ── Step 7: Create Fix PR ─────────────────────────────────────────────────
+  # ── Step 4: Create Fix PR ────────────────────────────────────────────────
+  # Chạy trước notify-ingress để dashboard chỉ hiện Accept Auto-Fix khi PR đã tồn tại.
   - name: create-fix-pr
-    # Thay thế image cũ bằng image Alpine đã tích hợp sẵn Python3 và Git
     image: alpine:3.19
     when:
       event: push
@@ -85,9 +58,141 @@ steps:
       GITEA_TOKEN:
         from_secret: GITEA_TOKEN
     commands:
-      # Alpine dùng 'apk' cài git và python chỉ mất đúng 1 giây, không cần update mỏi mắt
       - apk add --no-cache git python3
-      
       - git config --global --add safe.directory '*'
-      - echo "🚀 Creating fix PR if fixes were applied..."
+      - echo "🚀 Creating OpenStack auto-fix PR if fixes were applied..."
       - python3 .woodpecker/iac-autofix/gitea_pr.py --fix-dir fix_output --report-json fix_output/fix_report.json --report-md fix_output/PR_SUMMARY.md
+
+  # ── Step 5: Notify Ingress with OPA decision + scan summary ───────────────
+  - name: notify-ingress
+    image: badouralix/curl-jq:latest
+    when:
+      status: [success, failure]
+    environment:
+      INGRESS_CALLBACK_TOKEN:
+        from_secret: INGRESS_CALLBACK_TOKEN
+    commands:
+      - |
+        set -eu
+
+        if [ ! -f deploy-meta.json ]; then
+          echo "No deploy-meta.json found. Probably initial repo setup. Skip notify."
+          exit 0
+        fi
+
+        DEPLOYMENT_ID="$(jq -r '.deployment_id // empty' deploy-meta.json)"
+        CALLBACK_URL="$(jq -r '.callback_url // empty' deploy-meta.json)"
+        TF_WORKDIR="$(jq -r '.tf_workdir // "."' deploy-meta.json)"
+        REPO_NAME="${CI_REPO:-${CI_REPO_OWNER:-unknown}/${CI_REPO_NAME:-unknown}}"
+        COMMIT_SHA="${CI_COMMIT_SHA:-unknown}"
+        BRANCH_NAME="${CI_COMMIT_BRANCH:-main}"
+        PIPELINE_URL="${CI_PIPELINE_URL:-}"
+
+        if [ -z "$DEPLOYMENT_ID" ] || [ -z "$CALLBACK_URL" ]; then
+          echo "Missing deployment_id or callback_url in deploy-meta.json. Skip notify."
+          exit 0
+        fi
+
+        mkdir -p fix_output
+
+        if [ ! -f fix_output/fix_report.json ]; then
+          echo '{"summary":{"total":0,"fixed":0,"skipped":0,"failed":1,"manual":0,"files_patched":0}}' > fix_output/fix_report.json
+        fi
+
+        if [ ! -f fix_output/PR_SUMMARY.md ]; then
+          echo "# Scan summary unavailable" > fix_output/PR_SUMMARY.md
+        fi
+
+        if [ ! -f opa-response.json ]; then
+          jq -n \
+            --slurpfile fix_report fix_output/fix_report.json \
+            '{
+              result: {
+                deny: (
+                  (($fix_report[0].summary.total // 0) > 0)
+                  or
+                  (($fix_report[0].summary.failed // 0) > 0)
+                ),
+                allow: (
+                  (($fix_report[0].summary.total // 0) == 0)
+                  and
+                  (($fix_report[0].summary.failed // 0) == 0)
+                ),
+                fallback_reason: "opa-response.json missing"
+              }
+            }' > opa-response.json
+        fi
+
+        jq -n \
+          --arg deployment_id "$DEPLOYMENT_ID" \
+          --arg repo "$REPO_NAME" \
+          --arg commit "$COMMIT_SHA" \
+          --arg branch "$BRANCH_NAME" \
+          --arg tf_workdir "$TF_WORKDIR" \
+          --arg pipeline_url "$PIPELINE_URL" \
+          --rawfile summary_markdown fix_output/PR_SUMMARY.md \
+          --slurpfile fix_report fix_output/fix_report.json \
+          --slurpfile opa_response opa-response.json \
+          '{
+            deployment_id: $deployment_id,
+            repo: $repo,
+            commit: $commit,
+            branch: $branch,
+            tf_workdir: $tf_workdir,
+            pipeline_url: $pipeline_url,
+            opa: {
+              deny: (
+                $opa_response[0].result.deny //
+                (
+                  if ($opa_response[0].result.allow? != null)
+                  then (if $opa_response[0].result.allow then false else true end)
+                  else (
+                    (($fix_report[0].summary.total // 0) > 0)
+                    or
+                    (($fix_report[0].summary.failed // 0) > 0)
+                  )
+                  end
+                )
+              ),
+              allow: (
+                $opa_response[0].result.allow //
+                (
+                  if ($opa_response[0].result.deny? != null)
+                  then (if $opa_response[0].result.deny then false else true end)
+                  else (
+                    (($fix_report[0].summary.total // 0) == 0)
+                    and
+                    (($fix_report[0].summary.failed // 0) == 0)
+                  )
+                  end
+                )
+              ),
+              summary: ($opa_response[0].result.summary // {})
+            },
+            summary_markdown: $summary_markdown,
+            fix_report: $fix_report[0]
+          }' > ingress-payload.json
+
+        echo "===== ingress-payload.json ====="
+        cat ingress-payload.json
+
+        curl -k --fail -s -X POST "$CALLBACK_URL" \
+          -H "Content-Type: application/json" \
+          -H "X-CI-Token: $INGRESS_CALLBACK_TOKEN" \
+          -d @ingress-payload.json
+
+        echo "✅ OpenStack OPA decision + scan summary sent to Ingress"
+
+  # ── Step 6: Log to ELK ───────────────────────────────────────────────────
+  - name: log-to-elk
+    image: badouralix/curl-jq:latest
+    when:
+      status: [success, failure]
+    commands:
+      - echo "📤 Sending OpenStack scan metrics to ELK Logstash..."
+      - >
+        curl --fail -s -X POST http://logstash:5055
+        -H "Content-Type: application/json"
+        -d @fix_output/fix_report.json
+      - cat fix_output/fix_report.json
+      - echo "✅ Logs successfully pushed to ELK"
