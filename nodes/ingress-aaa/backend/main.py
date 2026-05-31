@@ -3,8 +3,17 @@ import re
 import time
 import requests
 
-from fastapi import FastAPI, Header, HTTPException, Depends
+from fastapi import FastAPI, Header, HTTPException, Depends, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+
+from auth_cookies import (
+    COOKIE_REFRESH,
+    SESSION_MAX_AGE,
+    clear_auth_cookies,
+    extract_access_token,
+    extract_refresh_token,
+    set_auth_cookies,
+)
 from pydantic import BaseModel, Field
 import jwt
 from jwt import PyJWKClient
@@ -70,10 +79,16 @@ ADMIN_ROLES_URL  = f"{KEYCLOAK_INTERNAL_URL}/admin/realms/{REALM}/roles"
 
 app = FastAPI(title="Hybrid Cloud Portal Backend")
 
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+CORS_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("CORS_ORIGINS", FRONTEND_URL).split(",")
+    if origin.strip()
+]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -342,7 +357,7 @@ def login_keycloak(username: str, password: str):
         "client_id": CLIENT_ID,
         "username": username,
         "password": password,
-        "scope": "openid profile email"
+        "scope": "openid profile email",
     }
 
     r = requests.post(TOKEN_URL, data=data, timeout=10)
@@ -351,6 +366,26 @@ def login_keycloak(username: str, password: str):
         raise HTTPException(
             status_code=401,
             detail="Invalid username or password"
+        )
+
+    return r.json()
+
+
+def refresh_keycloak(refresh_token: str):
+    wait_keycloak()
+
+    data = {
+        "grant_type": "refresh_token",
+        "client_id": CLIENT_ID,
+        "refresh_token": refresh_token,
+    }
+
+    r = requests.post(TOKEN_URL, data=data, timeout=10)
+
+    if r.status_code != 200:
+        raise HTTPException(
+            status_code=401,
+            detail="Session expired. Please sign in again.",
         )
 
     return r.json()
@@ -458,30 +493,26 @@ def get_roles_from_token(user: dict) -> set[str]:
 
     return roles
 
-def get_current_user(authorization: str | None = Header(default=None)):
-    if not authorization:
-        raise HTTPException(
-            status_code=401,
-            detail="Missing Authorization header"
-        )
+def get_current_user(
+    request: Request,
+    response: Response,
+    authorization: str | None = Header(default=None),
+):
+    token = extract_access_token(request, authorization)
 
-    authorization = authorization.strip()
+    if token:
+        try:
+            return verify_token(token)
+        except HTTPException:
+            pass
 
-    if not authorization.lower().startswith("bearer "):
-        raise HTTPException(
-            status_code=401,
-            detail=f"Invalid Authorization header format: {authorization[:20]}"
-        )
+    refresh_token = request.cookies.get(COOKIE_REFRESH)
+    if not refresh_token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
 
-    token = authorization.split(" ", 1)[1].strip()
-
-    if not token:
-        raise HTTPException(
-            status_code=401,
-            detail="Empty bearer token"
-        )
-
-    return verify_token(token)
+    token_data = refresh_keycloak(refresh_token)
+    set_auth_cookies(response, token_data)
+    return verify_token(token_data["access_token"])
 
 @app.get("/")
 def root():
@@ -652,15 +683,37 @@ def register(req: RegisterRequest):
 
 
 @app.post("/auth/login")
-def login(req: LoginRequest):
+def login(req: LoginRequest, response: Response):
     token_data = login_keycloak(req.username, req.password)
+    set_auth_cookies(response, token_data)
 
     return {
-        "access_token": token_data["access_token"],
-        "refresh_token": token_data.get("refresh_token"),
+        "status": "ok",
         "expires_in": token_data.get("expires_in"),
-        "token_type": token_data.get("token_type", "Bearer")
+        "session_max_age": SESSION_MAX_AGE,
     }
+
+
+@app.post("/auth/refresh")
+def refresh_session(request: Request, response: Response):
+    refresh_token = extract_refresh_token(request, None)
+
+    if not refresh_token:
+        raise HTTPException(status_code=401, detail="Missing refresh token")
+
+    token_data = refresh_keycloak(refresh_token)
+    set_auth_cookies(response, token_data)
+
+    return {
+        "status": "refreshed",
+        "expires_in": token_data.get("expires_in"),
+    }
+
+
+@app.post("/auth/logout")
+def logout(response: Response):
+    clear_auth_cookies(response)
+    return {"status": "logged_out"}
 
 @app.get("/me")
 def me(current_user: dict = Depends(get_current_user)):
@@ -702,9 +755,9 @@ def tenants(current_user: dict = Depends(get_current_user)):
     }
 
 @app.post("/scan/iac")
-def scan_iac(authorization: str = Header(None)):
-    payload = verify_token(authorization)
-    require_role(payload, "tenant")
+def scan_iac(current_user: dict = Depends(get_current_user)):
+    require_role(current_user, "tenant")
+    payload = current_user
 
     return {
         "status": "scanning",
@@ -715,8 +768,8 @@ def scan_iac(authorization: str = Header(None)):
 
 
 @app.post("/deploy/openstack")
-def deploy_openstack(authorization: str = Header(None)):
-    payload = verify_token(authorization)
+def deploy_openstack(current_user: dict = Depends(get_current_user)):
+    payload = current_user
     require_role(payload, "deploy_openstack")
 
     username = payload.get("preferred_username")

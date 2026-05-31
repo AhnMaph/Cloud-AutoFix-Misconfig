@@ -1,29 +1,31 @@
 export const styles = {
   root: {
     minHeight: "100vh",
-    background: "#0f1117",
+    background:
+      "radial-gradient(ellipse 80% 50% at 50% -20%, rgba(74, 158, 255, 0.12), transparent), #0b0d12",
     color: "#e8eaf0",
-    fontFamily: "'DM Mono', 'Courier New', monospace",
+    fontFamily: "'Inter', system-ui, -apple-system, sans-serif",
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
     padding: "24px",
   },
   card: {
-    background: "#1a1d27",
-    border: "1px solid #2a2d3a",
-    borderRadius: "12px",
+    background: "linear-gradient(180deg, #1c2030 0%, #161a26 100%)",
+    border: "1px solid #2f3548",
+    borderRadius: "16px",
     padding: "40px",
     width: "100%",
     maxWidth: "420px",
-    boxShadow: "0 8px 32px rgba(0,0,0,0.4)",
+    boxShadow: "0 16px 48px rgba(0, 0, 0, 0.45)",
   },
   logo: {
     fontSize: "11px",
-    letterSpacing: "0.2em",
-    color: "#4a9eff",
+    letterSpacing: "0.18em",
+    color: "#60a5fa",
     textTransform: "uppercase",
     marginBottom: "8px",
+    fontWeight: "600",
   },
   title: {
     fontSize: "24px",
@@ -114,7 +116,16 @@ export const styles = {
   },
   dashboard: {
     width: "100%",
-    maxWidth: "600px",
+    maxWidth: "720px",
+  },
+  dashboardCard: {
+    background: "linear-gradient(180deg, #1c2030 0%, #161a26 100%)",
+    border: "1px solid #2f3548",
+    borderRadius: "16px",
+    padding: "32px 36px",
+    width: "100%",
+    maxWidth: "720px",
+    boxShadow: "0 16px 48px rgba(0, 0, 0, 0.45)",
   },
   dashHeader: {
     display: "flex",

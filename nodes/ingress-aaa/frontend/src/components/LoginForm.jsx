@@ -1,8 +1,6 @@
 import { useState } from "react";
-import axios from "axios";
 import { styles } from "../styles";
-
-const API_URL = import.meta.env.VITE_BACKEND_URL;
+import { login } from "../auth/session";
 
 export default function LoginForm({ onSuccess }) {
   const [form, setForm]       = useState({ username: "", password: "" });
@@ -19,8 +17,7 @@ export default function LoginForm({ onSuccess }) {
     }
     setLoading(true);
     try {
-      const res = await axios.post(`${API_URL}/auth/login`, form);
-      window.__authToken = res.data.access_token;
+      await login(form);
       onSuccess?.();
     } catch (err) {
       setError(err.response?.data?.detail || err.message);

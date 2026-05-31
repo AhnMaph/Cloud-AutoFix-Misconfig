@@ -1,35 +1,83 @@
-import { useState } from "react";
-import axios from "axios";
+import { useEffect, useState } from "react";
 
 import { styles } from "./styles";
 import LoginForm from "./components/LoginForm";
 import RegisterForm from "./components/RegisterForm";
 import Dashboard from "./components/Dashboard";
-
-const API_URL = import.meta.env.VITE_BACKEND_URL;
+import { setupApiInterceptors } from "./api/client";
+import { checkSession, logout as logoutSession } from "./auth/session";
 
 export default function App() {
   const [loggedIn, setLoggedIn] = useState(false);
   const [me, setMe] = useState(null);
   const [tab, setTab] = useState("login");
+  const [bootstrapping, setBootstrapping] = useState(true);
+
+  function handleUnauthorized() {
+    setLoggedIn(false);
+    setMe(null);
+  }
+
+  useEffect(() => {
+    setupApiInterceptors(handleUnauthorized);
+  }, []);
+
+  async function loadProfile() {
+    const profile = await checkSession();
+    setMe(profile);
+    setLoggedIn(true);
+    return profile;
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      try {
+        await loadProfile();
+      } catch (err) {
+        if (!cancelled) {
+          setLoggedIn(false);
+          setMe(null);
+        }
+        console.error("Session restore failed:", err.response?.data || err.message);
+      } finally {
+        if (!cancelled) setBootstrapping(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   async function onLoginSuccess() {
     try {
-      const res = await axios.get(`${API_URL}/me`, {
-        headers: { Authorization: `Bearer ${window.__authToken}` },
-      });
-      setMe(res.data);
-      setLoggedIn(true);
+      await loadProfile();
     } catch (err) {
       console.error("ME error:", err.response?.data || err.message);
       setLoggedIn(false);
+      setMe(null);
     }
   }
 
-  function logout() {
-    window.__authToken = null;
+  async function logout() {
+    await logoutSession();
     setLoggedIn(false);
     setMe(null);
+  }
+
+  if (bootstrapping) {
+    return (
+      <div style={styles.root}>
+        <div style={{ ...styles.card, textAlign: "center", maxWidth: "320px" }}>
+          <div style={styles.logo}>Hybrid Cloud Portal</div>
+          <div style={{ color: "#94a3b8", fontSize: "14px", marginTop: "12px" }}>
+            Restoring session…
+          </div>
+        </div>
+      </div>
+    );
   }
 
   if (loggedIn) {
@@ -44,14 +92,17 @@ export default function App() {
     <div style={styles.root}>
       <div style={styles.card}>
         <div style={styles.logo}>Hybrid Cloud Portal</div>
-        <div style={styles.title}>Chào mừng</div>
+        <div style={styles.title}>Welcome</div>
 
         <div style={styles.tabs}>
           <button style={styles.tab(tab === "login")} onClick={() => setTab("login")}>
-            Đăng nhập
+            Sign in
           </button>
-          <button style={styles.tab(tab === "register")} onClick={() => setTab("register")}>
-            Đăng ký
+          <button
+            style={styles.tab(tab === "register")}
+            onClick={() => setTab("register")}
+          >
+            Register
           </button>
         </div>
 

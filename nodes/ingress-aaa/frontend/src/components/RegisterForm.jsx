@@ -1,8 +1,6 @@
 import { useState } from "react";
-import axios from "axios";
 import { styles } from "../styles";
-
-const API_URL = import.meta.env.VITE_BACKEND_URL;
+import { api } from "../api/client";
 
 export default function RegisterForm({ onSuccess }) {
   const [form, setForm]       = useState({ username: "", password: "", email: "" });
@@ -30,7 +28,7 @@ export default function RegisterForm({ onSuccess }) {
         email: form.email.trim() || null,
       };
 
-      const res = await axios.post(`${API_URL}/auth/register`, payload);
+      const res = await api.post("/auth/register", payload);
 
       setSuccess(
         `Đăng ký thành công! User: ${res.data.username} — Tenant tự động: ${res.data.tenant_id}`

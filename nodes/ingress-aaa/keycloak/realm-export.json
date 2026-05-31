@@ -1,6 +1,11 @@
 {
   "realm": "hybrid-cloud",
   "enabled": true,
+  "accessTokenLifespan": 3600,
+  "ssoSessionIdleTimeout": 2592000,
+  "ssoSessionMaxLifespan": 2592000,
+  "clientSessionIdleTimeout": 2592000,
+  "clientSessionMaxLifespan": 2592000,
   "roles": {
     "realm": [
       {
@@ -58,7 +63,8 @@
         "http://localhost:5173"
       ],
       "attributes": {
-        "pkce.code.challenge.method": "S256"
+        "pkce.code.challenge.method": "S256",
+        "access.token.lifespan": "3600"
       }
     }
   ]

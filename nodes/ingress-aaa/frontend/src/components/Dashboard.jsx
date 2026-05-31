@@ -1,11 +1,10 @@
 import { useEffect, useState } from "react";
-import axios from "axios";
 import { styles } from "../styles";
 import { RESOURCE_TYPES } from "../constants/resources";
 import ResourceForm from "./ResourceForm";
 import DeployResult from "./DeployResult";
-
-const API_URL = import.meta.env.VITE_BACKEND_URL;
+import MarkdownContent from "./MarkdownContent";
+import { api } from "../api/client";
 
 export default function Dashboard({ me, onLogout }) {
   const [activeResource, setActiveResource] = useState(null);
@@ -14,19 +13,9 @@ export default function Dashboard({ me, onLogout }) {
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
 
-  function authHeaders() {
-    const token = window.__authToken;
-
-    return {
-      Authorization: `Bearer ${token}`,
-    };
-  }
-
   async function fetchLatestDeployment() {
     try {
-      const res = await axios.get(`${API_URL}/deployments/latest`, {
-        headers: authHeaders(),
-      });
+      const res = await api.get("/deployments/latest");
 
       setDeployment(res.data.item || null);
       return res.data.item || null;
@@ -64,18 +53,12 @@ export default function Dashboard({ me, onLogout }) {
     setLoading(true);
 
     try {
-      const res = await axios.post(
-        `${API_URL}/deploy/repo`,
-        {
-          resource_type: activeResource.type,
-          action,
-          region: formData.region || "us-east-1",
-          extra: formData,
-        },
-        {
-          headers: authHeaders(),
-        }
-      );
+      const res = await api.post("/deploy/repo", {
+        resource_type: activeResource.type,
+        action,
+        region: formData.region || "us-east-1",
+        extra: formData,
+      });
 
       setDeployResult(res.data);
       setDeployment(res.data.deployment || null);
@@ -94,13 +77,7 @@ export default function Dashboard({ me, onLogout }) {
     try {
       setError(null);
 
-      const res = await axios.post(
-        `${API_URL}/deployments/${id}/request-fix`,
-        {},
-        {
-          headers: authHeaders(),
-        }
-      );
+      const res = await api.post(`/deployments/${id}/request-fix`, {});
 
       setDeployment(res.data.deployment);
     } catch (err) {
@@ -112,13 +89,7 @@ export default function Dashboard({ me, onLogout }) {
     try {
       setError(null);
 
-      const res = await axios.post(
-        `${API_URL}/deployments/${id}/deny`,
-        {},
-        {
-          headers: authHeaders(),
-        }
-      );
+      const res = await api.post(`/deployments/${id}/deny`, {});
 
       setDeployment(res.data.deployment);
     } catch (err) {
@@ -131,13 +102,7 @@ export default function Dashboard({ me, onLogout }) {
       setError(null);
       setLoading(true);
 
-      const res = await axios.post(
-        `${API_URL}/deployments/${id}/accept`,
-        {},
-        {
-          headers: authHeaders(),
-        }
-      );
+      const res = await api.post(`/deployments/${id}/accept`, {});
 
       setDeployment(res.data.deployment);
     } catch (err) {
@@ -163,7 +128,7 @@ export default function Dashboard({ me, onLogout }) {
 
   return (
     <div style={styles.dashboard}>
-      <div style={styles.card}>
+      <div style={styles.dashboardCard}>
         {/* Header */}
         <div style={styles.dashHeader}>
           <div>
@@ -231,26 +196,19 @@ export default function Dashboard({ me, onLogout }) {
 
         {/* Deployment Security Review */}
         {deployment && (
-          <div
-            style={{
-              marginTop: "24px",
-              padding: "16px",
-              border: "1px solid #2f3545",
-              borderRadius: "12px",
-              background: "#0f172a",
-              color: "#e5e7eb",
-            }}
-          >
-            <div
-              style={{
-                fontSize: "13px",
-                color: "#94a3b8",
-                textTransform: "uppercase",
-                letterSpacing: "0.08em",
-                marginBottom: "12px",
-              }}
-            >
-              Deployment Security Review
+          <div style={reviewPanelStyle}>
+            <div style={reviewHeaderStyle}>
+              <span style={reviewTitleStyle}>Deployment Security Review</span>
+              <span
+                style={{
+                  ...reviewStatusPillStyle,
+                  color: getStatusColor(deployment.status),
+                  borderColor: `${getStatusColor(deployment.status)}44`,
+                  background: `${getStatusColor(deployment.status)}14`,
+                }}
+              >
+                {deployment.status}
+              </span>
             </div>
 
             <div style={infoLineStyle}>
@@ -304,19 +262,11 @@ export default function Dashboard({ me, onLogout }) {
             )}
 
             {deployment.recommendation && (
-              <div
-                style={{
-                  padding: "10px",
-                  borderRadius: "8px",
-                  background: "#111827",
-                  color: "#d1d5db",
-                  fontSize: "13px",
-                  marginTop: "10px",
-                  marginBottom: "12px",
-                  lineHeight: "1.5",
-                }}
-              >
-                {deployment.recommendation}
+              <div style={recommendationBoxStyle}>
+                <div style={recommendationLabelStyle}>Scanner recommendation</div>
+                <MarkdownContent className="markdown-content--compact">
+                  {deployment.recommendation}
+                </MarkdownContent>
               </div>
             )}
 
@@ -336,21 +286,18 @@ export default function Dashboard({ me, onLogout }) {
               </div>
             )}
 
-            <pre
-              style={{
-                whiteSpace: "pre-wrap",
-                maxHeight: "360px",
-                overflow: "auto",
-                background: "#020617",
-                padding: "12px",
-                borderRadius: "8px",
-                color: "#d1d5db",
-                fontSize: "12px",
-                lineHeight: "1.5",
-              }}
-            >
-              {deployment.summary_markdown || "Waiting for CI/CD scan result..."}
-            </pre>
+            <div style={scanReportBoxStyle}>
+              <div style={recommendationLabelStyle}>Scan report</div>
+              {deployment.summary_markdown ? (
+                <MarkdownContent className="markdown-content--compact markdown-content--scroll">
+                  {deployment.summary_markdown}
+                </MarkdownContent>
+              ) : (
+                <p style={{ margin: 0, color: "#94a3b8", fontSize: "13px" }}>
+                  Waiting for CI/CD scan result…
+                </p>
+              )}
+            </div>
 
             <div style={{ display: "flex", gap: "10px", marginTop: "14px" }}>
               {["blocked_by_policy", "needs_user_fix_decision"].includes(
@@ -484,6 +431,68 @@ export default function Dashboard({ me, onLogout }) {
 const infoLineStyle = {
   fontSize: "14px",
   marginBottom: "6px",
+};
+
+const reviewPanelStyle = {
+  marginTop: "28px",
+  padding: "20px",
+  border: "1px solid #2f3545",
+  borderRadius: "14px",
+  background: "linear-gradient(180deg, #121a2e 0%, #0f172a 100%)",
+  color: "#e5e7eb",
+  boxShadow: "inset 0 1px 0 rgba(255, 255, 255, 0.04)",
+};
+
+const reviewHeaderStyle = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: "12px",
+  marginBottom: "16px",
+  flexWrap: "wrap",
+};
+
+const reviewTitleStyle = {
+  fontSize: "12px",
+  color: "#94a3b8",
+  textTransform: "uppercase",
+  letterSpacing: "0.1em",
+  fontWeight: "600",
+};
+
+const reviewStatusPillStyle = {
+  fontSize: "11px",
+  fontWeight: "600",
+  textTransform: "uppercase",
+  letterSpacing: "0.06em",
+  padding: "4px 10px",
+  borderRadius: "999px",
+  border: "1px solid",
+};
+
+const recommendationBoxStyle = {
+  padding: "14px 16px",
+  borderRadius: "10px",
+  background: "#111827",
+  border: "1px solid #1e293b",
+  marginTop: "12px",
+  marginBottom: "14px",
+};
+
+const recommendationLabelStyle = {
+  fontSize: "10px",
+  fontWeight: "600",
+  letterSpacing: "0.12em",
+  textTransform: "uppercase",
+  color: "#64748b",
+  marginBottom: "10px",
+};
+
+const scanReportBoxStyle = {
+  background: "#020617",
+  border: "1px solid #1e293b",
+  borderRadius: "10px",
+  padding: "14px 16px",
 };
 
 function SummaryBox({ label, value }) {
