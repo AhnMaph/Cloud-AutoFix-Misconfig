@@ -68,11 +68,15 @@ steps:
   - name: opa-policy-check
     image: badouralix/curl-jq:latest
     commands:
-      - curl -i -s http://opa:8181/v1/health || echo "❌ OPA Server die rồi!"
+      - curl -i -s http://opa:8181/health || (echo "❌ OPA Server sập nguồn hoặc sai cấu hình mạng!"; exit 1)
       - >
-        curl --fail -s -X POST http://opa:8181/v1/data/aws/iac
+        jq -n --argjson data "$(cat fix_output/fix_report.json)" '{"input": $data}' > managed_input.json
+      # 2. Bắn dữ liệu sang endpoint /main để nhận kết quả rút gọn (allow, deny, summary)
+      - >
+        curl --fail -s -X POST http://opa:8181/v1/data/aws/iac/main
         -H "Content-Type: application/json"
-        -d "{\"input\": $(cat fix_output/fix_report.json)}" > opa-response.json
+        -d @managed_input.json > opa-response.json
+      - cat managed_input.json
       - cat opa-response.json
 
   # ── Step 6: Log to ELK ───────────────────────────────────────────────────
@@ -88,11 +92,10 @@ steps:
         -d @fix_output/fix_report.json
       - cat fix_output/fix_report.json
       - echo "✅ Logs successfully pushed to ELK"
-  # ── Step 7: Create Fix PR ─────────────────────────────────────────────────
-  # Chỉ chạy khi push lên main/develop (không chạy khi đã là PR)
-  # và chỉ khi các step trước thành công
+# ── Step 7: Create Fix PR ─────────────────────────────────────────────────
   - name: create-fix-pr
-    image: *python_image
+    # Thay thế image cũ bằng image Alpine đã tích hợp sẵn Python3 và Git
+    image: alpine:3.19
     when:
       event: push
       status: success
@@ -101,20 +104,10 @@ steps:
         from_secret: GITEA_URL
       GITEA_TOKEN:
         from_secret: GITEA_TOKEN
-      GIT_AUTHOR_NAME:  "IaC AutoFix Bot"
-      GIT_AUTHOR_EMAIL: "autofix-bot@ci.local"
     commands:
-      - pip install -q colorama
-
-      # Cài git (image slim không có sẵn)
-      - apt-get update -qq && apt-get install -y -qq git
-
-      # Cấu hình git safe directory (Woodpecker mount repo vào /woodpecker/src/...)
+      # Alpine dùng 'apk' cài git và python chỉ mất đúng 1 giây, không cần update mỏi mắt
+      - apk add --no-cache git python3
+      
       - git config --global --add safe.directory '*'
-
       - echo "🚀 Creating fix PR if fixes were applied..."
-      - >
-        python .woodpecker/iac-autofix/gitea_pr.py
-        --fix-dir     fix_output
-        --report-json fix_output/fix_report.json
-        --report-md   fix_output/PR_SUMMARY.md
+      - python3 .woodpecker/iac-autofix/gitea_pr.py --fix-dir fix_output --report-json fix_output/fix_report.json --report-md fix_output/PR_SUMMARY.md
