@@ -365,7 +365,7 @@ class SingleFilePatcher:
         """Apply all findings that target this file. Returns per-finding results."""
         results = []
         for finding in findings:
-            check_id = finding.get("check_id", "")
+            check_id = finding.get("rule_id") or finding.get("check_id", "")
             rule     = FIX_REGISTRY.get(check_id)
 
             if not rule:
@@ -439,7 +439,7 @@ class MultiFilePatcher:
         unmatched   = []
 
         for finding in findings:
-            target = self._resolve_file(finding.get("file", ""))
+            target = self._resolve_file(finding.get("file_path") or finding.get("file") or "")
             if target is None:
                 unmatched.append(finding)
                 all_results.append({

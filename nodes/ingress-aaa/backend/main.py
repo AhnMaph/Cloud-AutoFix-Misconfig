@@ -10,6 +10,7 @@ import jwt
 from jwt import PyJWKClient
 from typing import Literal
 
+from providers.aws import create_tenant_iam_role, terraform_aws_deploy
 from providers.openstack import create_tenant_project, terraform_openstack_deploy
 try:
     from providers.openstack import create_tenant_project, terraform_openstack_deploy
@@ -991,6 +992,19 @@ def list_my_deployments(current_user: dict = Depends(get_current_user)):
     }
 
 
+# IMPORTANT:
+# This route must be declared BEFORE /deployments/{deployment_id}
+@app.get("/deployments/latest")
+def latest_my_deployment(current_user: dict = Depends(get_current_user)):
+    tenant_id = extract_tenant_id(current_user)
+    items = list_deployments_by_tenant(tenant_id)
+
+    if not items:
+        return {"item": None}
+
+    return {"item": items[0]}
+
+
 @app.get("/deployments/{deployment_id}")
 def get_my_deployment(
     deployment_id: str,
@@ -1006,6 +1020,41 @@ def get_my_deployment(
         raise HTTPException(status_code=403, detail="Forbidden")
 
     return deployment
+
+
+@app.post("/deployments/{deployment_id}/request-fix")
+def request_fix_deployment(
+    deployment_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    tenant_id = extract_tenant_id(current_user)
+    deployment = get_deployment(deployment_id)
+
+    if not deployment:
+        raise HTTPException(status_code=404, detail="Deployment not found")
+
+    if deployment.get("tenant_id") != tenant_id:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    if not deployment.get("opa", {}).get("deny", True):
+        raise HTTPException(
+            status_code=400,
+            detail="Deployment is not denied by policy"
+        )
+
+    updated = update_deployment(
+        deployment_id,
+        {
+            "status": "user_requested_fix",
+            "user_decision": "request_fix",
+        },
+    )
+
+    return {
+        "status": "user_requested_fix",
+        "deployment": updated,
+    }
+
 
 @app.post("/deployments/{deployment_id}/deny")
 def deny_deployment(

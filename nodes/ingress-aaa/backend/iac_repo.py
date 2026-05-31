@@ -182,15 +182,25 @@ def seed_tenant_repo_from_template(provider: str, tenant_repo: str):
     token = gitea_token()
     base = gitea_base_url()
 
-    template_repo = template_repo_name(provider)
-
-    template_clone = build_clone_url(base, owner, template_repo, username, token)
     tenant_clone = build_clone_url(base, owner, tenant_repo, username, token)
 
     try:
-        run_cmd(["git", "clone", template_clone, "template"], cwd=tmp_dir)
+        template_mode = os.getenv("IAC_TEMPLATE_MODE", "local").lower()
 
         repo_dir = tmp_dir / "template"
+
+        if template_mode == "local":
+            src = template_dir_for_provider(provider)
+
+            if not src.exists():
+                raise RuntimeError(f"Local template directory not found: {src}")
+
+            shutil.copytree(src, repo_dir)
+
+        else:
+            template_repo = template_repo_name(provider)
+            template_clone = build_clone_url(base, owner, template_repo, username, token)
+            run_cmd(["git", "clone", template_clone, "template"], cwd=tmp_dir)
 
         shutil.rmtree(repo_dir / ".git", ignore_errors=True)
         clean_seed_repo(repo_dir)
@@ -649,3 +659,12 @@ def trigger_woodpecker_pipeline(repo: str) -> str:
 
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+        
+def template_dir_for_provider(provider: str) -> Path:
+    if provider == "aws":
+        return Path(required_env("IAC_TEMPLATE_DIR_AWS"))
+
+    if provider == "openstack":
+        return Path(required_env("IAC_TEMPLATE_DIR_OPENSTACK"))
+
+    raise RuntimeError(f"Unsupported provider: {provider}")

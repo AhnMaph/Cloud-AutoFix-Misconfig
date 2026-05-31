@@ -77,9 +77,13 @@ services:
       WOODPECKER_TOKEN: ${WOODPECKER_TOKEN}
       AUTO_ENABLE_WOODPECKER: ${AUTO_ENABLE_WOODPECKER:-true}
 
-      IAC_TEMPLATE_REPO_AWS: ${IAC_TEMPLATE_REPO_AWS}
-      IAC_TEMPLATE_REPO_OPENSTACK: ${IAC_TEMPLATE_REPO_OPENSTACK}
+      # IAC_TEMPLATE_REPO_AWS: ${IAC_TEMPLATE_REPO_AWS}
+      # IAC_TEMPLATE_REPO_OPENSTACK: ${IAC_TEMPLATE_REPO_OPENSTACK}
       IAC_TARGET_BRANCH: ${IAC_TARGET_BRANCH:-main}
+
+      IAC_TEMPLATE_MODE: ${IAC_TEMPLATE_MODE:-local}
+      IAC_TEMPLATE_DIR_AWS: ${IAC_TEMPLATE_DIR_AWS}
+      IAC_TEMPLATE_DIR_OPENSTACK: ${IAC_TEMPLATE_DIR_OPENSTACK}
 
       CI_CALLBACK_TOKEN: ${CI_CALLBACK_TOKEN}
       DEPLOYMENT_STORE_PATH: ${DEPLOYMENT_STORE_PATH:-/app/data/deployments.json}
@@ -89,6 +93,8 @@ services:
     volumes:
       - terraform_state:/app/tfstate
       - tenant_data:/app/data
+      - ../cicd/aws-infrastructure-iac:/iac-templates/aws-infrastructure-iac:ro
+      - ../cicd/openstack-infrastructure-iac:/iac-templates/openstack-infrastructure-iac:ro
     networks:
       - portal-net
 
