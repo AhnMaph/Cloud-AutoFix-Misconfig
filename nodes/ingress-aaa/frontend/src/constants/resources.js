@@ -28,20 +28,27 @@ export const RESOURCE_FIELDS = {
   ],
 
   vm: [
-    { key: "vm_name", label: "Server Name", placeholder: "app-server", required: true },
+    { key: "vm_name", label: "Server Name", placeholder: "demo-vm", required: true },
     {
-      key: "flavor_id",
-      label: "Server Size",
+      key: "image_name",
+      label: "Image",
       type: "select",
-      options: ["Small", "Medium", "Large"],
-      defaultValue: "Small"
+      options: ["cirros"],
+      defaultValue: "cirros"
     },
     {
-      key: "image",
-      label: "Operating System",
+      key: "flavor_name",
+      label: "Flavor",
       type: "select",
-      options: ["Ubuntu 22.04", "CentOS 9"],
-      defaultValue: "Ubuntu 22.04"
+      options: ["m1.tiny"],
+      defaultValue: "m1.tiny"
+    },
+    {
+      key: "network_name",
+      label: "Network",
+      type: "select",
+      options: ["public-net"],
+      defaultValue: "public-net"
     },
   ],
 

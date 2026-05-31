@@ -10,11 +10,12 @@ import jwt
 from jwt import PyJWKClient
 from typing import Literal
 
-from providers.aws import terraform_aws_deploy, create_tenant_iam_role
+from providers.openstack import create_tenant_project, terraform_openstack_deploy
 try:
-    from providers.openstack import create_tenant_project
+    from providers.openstack import create_tenant_project, terraform_openstack_deploy
 except Exception:
     create_tenant_project = None
+    terraform_openstack_deploy = None
 
 from policy.engine import resolve_provider
     
@@ -743,30 +744,34 @@ def deploy(
     current_user: dict = Depends(get_current_user),
 ):
     roles = get_roles_from_token(current_user)
+
     if roles.isdisjoint({"admin", "tenant", "deploy_aws", "deploy_openstack"}):
         raise HTTPException(status_code=403, detail="Insufficient role")
 
     tenant_id = extract_tenant_id(current_user)
-
-    # Policy engine quyết định provider
     provider = resolve_provider(req.resource_type)
-    
+
     if provider == "openstack" and not OPENSTACK_ENABLED:
         raise HTTPException(
             status_code=503,
             detail="OpenStack provider is temporarily disabled"
         )
 
-    # Generate .tf file từ Jinja2 template
     context = {
         "tenant_id": tenant_id,
+
+        # AWS
         "aws_region": req.region,
         "project_name": "hybrid-portal",
+
+        # OpenStack
+        "os_region_name": os.getenv("OS_REGION_NAME", "RegionOne"),
+
         **req.extra,
     }
+
     tf_file = generate_template(provider, req.resource_type, context)
 
-    # Gọi terraform theo provider
     if provider == "aws":
         result = terraform_aws_deploy(
             tenant_id=tenant_id,
@@ -774,8 +779,38 @@ def deploy(
             action=req.action,
             workdir=tf_file.parent,
         )
+
+    elif provider == "openstack":
+        if terraform_openstack_deploy is None:
+            raise HTTPException(
+                status_code=500,
+                detail="OpenStack deploy function is not available"
+            )
+
+        # Đảm bảo project tenant tồn tại trước khi Terraform chạy.
+        if create_tenant_project:
+            create_tenant_project(tenant_id)
+
+        from providers.openstack import prepare_openstack_workspace
+
+        workdir = prepare_openstack_workspace(
+            tenant_id=tenant_id,
+            resource_type=req.resource_type,
+            generated_tf_file=tf_file,
+        )
+
+        result = terraform_openstack_deploy(
+            tenant_id=tenant_id,
+            resource_type=req.resource_type,
+            action=req.action,
+            workdir=workdir,
+        )
+
     else:
-        raise HTTPException(status_code=501, detail="OpenStack provider not yet implemented")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported provider: {provider}"
+        )
 
     return {
         "provider": provider,

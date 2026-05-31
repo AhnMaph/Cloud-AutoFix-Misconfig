@@ -1,5 +1,11 @@
 import os
 import requests
+import json
+import shutil
+import subprocess
+from pathlib import Path
+from typing import Literal
+
 
 
 def _required_env(name: str) -> str:
@@ -323,3 +329,168 @@ def get_tenant_project_scoped_token(tenant_id: str) -> str:
         raise RuntimeError("OpenStack response missing X-Subject-Token")
 
     return token
+
+TF_STATE_ROOT = Path(
+    os.getenv(
+        "TERRAFORM_STATE_ROOT",
+        "/app/tfstate"
+    )
+)
+
+
+def run_cmd(
+    cmd: list[str],
+    cwd: Path,
+    timeout: int = 300,
+    env_overrides: dict | None = None,
+) -> str:
+    env = os.environ.copy()
+
+    if env_overrides:
+        env.update(env_overrides)
+
+    process = subprocess.run(
+        cmd,
+        cwd=str(cwd),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=timeout,
+    )
+
+    if process.returncode != 0:
+        raise RuntimeError(process.stdout)
+
+    return process.stdout
+
+
+def tail(text: str, lines: int = 80) -> str:
+    return "\n".join(text.splitlines()[-lines:])
+
+
+def openstack_terraform_env(tenant_id: str) -> dict:
+    """
+    Terraform OpenStack provider đọc credential từ OS_* env.
+    Ở đây dùng admin user nhưng scope vào project tenant.
+    """
+    auth_url = os.getenv("OS_AUTH_URL", "").rstrip("/")
+    if auth_url and not auth_url.endswith("/v3"):
+        auth_url = f"{auth_url}/v3"
+
+    return {
+        "OS_AUTH_URL": auth_url,
+        "OS_USERNAME": _required_env("OS_USERNAME"),
+        "OS_PASSWORD": _required_env("OS_PASSWORD"),
+        "OS_PROJECT_NAME": tenant_id,
+        "OS_TENANT_NAME": tenant_id,
+        "OS_USER_DOMAIN_NAME": os.getenv("OS_USER_DOMAIN_NAME", "Default"),
+        "OS_PROJECT_DOMAIN_NAME": os.getenv("OS_PROJECT_DOMAIN_NAME", "Default"),
+        "OS_REGION_NAME": os.getenv("OS_REGION_NAME", "RegionOne"),
+        "OS_INTERFACE": os.getenv("OS_INTERFACE", "internal"),
+        "OS_IDENTITY_API_VERSION": os.getenv("OS_IDENTITY_API_VERSION", "3"),
+    }
+
+
+def prepare_openstack_workspace(
+    tenant_id: str,
+    resource_type: str,
+    generated_tf_file: Path,
+) -> Path:
+    workdir = TF_STATE_ROOT / "openstack" / tenant_id / resource_type
+    workdir.mkdir(parents=True, exist_ok=True)
+
+    shutil.copy2(generated_tf_file, workdir / "main.tf")
+
+    return workdir
+
+
+def terraform_openstack_deploy(
+    tenant_id: str,
+    resource_type: str,
+    action: Literal["plan", "apply", "destroy"] = "plan",
+    workdir: Path | None = None,
+) -> dict:
+    if workdir is None:
+        raise RuntimeError("Missing OpenStack Terraform workdir")
+
+    os_env = openstack_terraform_env(tenant_id)
+
+    init_output = run_cmd(
+        ["terraform", "init", "-input=false"],
+        cwd=workdir,
+        timeout=300,
+        env_overrides=os_env,
+    )
+
+    validate_output = run_cmd(
+        ["terraform", "validate"],
+        cwd=workdir,
+        timeout=120,
+        env_overrides=os_env,
+    )
+
+    if action == "plan":
+        deploy_output = run_cmd(
+            ["terraform", "plan", "-input=false"],
+            cwd=workdir,
+            timeout=300,
+            env_overrides=os_env,
+        )
+
+        return {
+            "status": "planned",
+            "provider": "openstack",
+            "tenant_id": tenant_id,
+            "resource_type": resource_type,
+            "terraform_init": tail(init_output),
+            "terraform_validate": tail(validate_output),
+            "terraform_output": tail(deploy_output, 120),
+        }
+
+    if action == "apply":
+        deploy_output = run_cmd(
+            ["terraform", "apply", "-input=false", "-auto-approve"],
+            cwd=workdir,
+            timeout=600,
+            env_overrides=os_env,
+        )
+
+        output_json_raw = run_cmd(
+            ["terraform", "output", "-json"],
+            cwd=workdir,
+            timeout=120,
+            env_overrides=os_env,
+        )
+
+        try:
+            output_json = json.loads(output_json_raw)
+        except json.JSONDecodeError:
+            output_json = {}
+
+        return {
+            "status": "applied",
+            "provider": "openstack",
+            "tenant_id": tenant_id,
+            "resource_type": resource_type,
+            "outputs": output_json,
+            "terraform_output": tail(deploy_output, 120),
+        }
+
+    if action == "destroy":
+        deploy_output = run_cmd(
+            ["terraform", "destroy", "-input=false", "-auto-approve"],
+            cwd=workdir,
+            timeout=600,
+            env_overrides=os_env,
+        )
+
+        return {
+            "status": "destroyed",
+            "provider": "openstack",
+            "tenant_id": tenant_id,
+            "resource_type": resource_type,
+            "terraform_output": tail(deploy_output, 120),
+        }
+
+    raise ValueError(f"Unsupported action: {action}")
