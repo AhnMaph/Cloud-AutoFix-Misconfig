@@ -69,3 +69,4 @@ deploy.json
 nodes/cicd/data/*
 
 digest.txt
+deploy-repo.json

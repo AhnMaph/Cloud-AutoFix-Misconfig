@@ -79,7 +79,85 @@ steps:
       - cat managed_input.json
       - cat opa-response.json
 
-  # ── Step 6: Log to ELK ───────────────────────────────────────────────────
+  # ── Step 6: Notify Ingress with OPA decision + scan summary ───────────────
+  - name: notify-ingress
+    image: badouralix/curl-jq:latest
+    when:
+      status: [success, failure]
+    environment:
+      INGRESS_CALLBACK_TOKEN:
+        from_secret: INGRESS_CALLBACK_TOKEN
+    commands:
+      - |
+        set -eu
+
+        if [ ! -f deploy-meta.json ]; then
+          echo "No deploy-meta.json found. Probably initial repo setup. Skip notify."
+          exit 0
+        fi
+
+        DEPLOYMENT_ID="$(jq -r '.deployment_id // empty' deploy-meta.json)"
+        CALLBACK_URL="$(jq -r '.callback_url // empty' deploy-meta.json)"
+        TF_WORKDIR="$(jq -r '.tf_workdir // "."' deploy-meta.json)"
+        REPO_NAME="${CI_REPO:-${CI_REPO_OWNER:-unknown}/${CI_REPO_NAME:-unknown}}"
+        COMMIT_SHA="${CI_COMMIT_SHA:-unknown}"
+        BRANCH_NAME="${CI_COMMIT_BRANCH:-main}"
+        PIPELINE_URL="${CI_PIPELINE_URL:-}"
+
+        if [ -z "$DEPLOYMENT_ID" ] || [ -z "$CALLBACK_URL" ]; then
+          echo "Missing deployment_id or callback_url in deploy-meta.json. Skip notify."
+          exit 0
+        fi
+
+        mkdir -p fix_output
+
+        if [ ! -f opa-response.json ]; then
+          echo '{"result":{"deny":true}}' > opa-response.json
+        fi
+
+        if [ ! -f fix_output/fix_report.json ]; then
+          echo '{"summary":{"total":0,"fixed":0,"skipped":0,"failed":1,"manual":0,"files_patched":0}}' > fix_output/fix_report.json
+        fi
+
+        if [ ! -f fix_output/PR_SUMMARY.md ]; then
+          echo "# Scan summary unavailable" > fix_output/PR_SUMMARY.md
+        fi
+
+        jq -n \
+          --arg deployment_id "$DEPLOYMENT_ID" \
+          --arg repo "$REPO_NAME" \
+          --arg commit "$COMMIT_SHA" \
+          --arg branch "$BRANCH_NAME" \
+          --arg tf_workdir "$TF_WORKDIR" \
+          --arg pipeline_url "$PIPELINE_URL" \
+          --rawfile summary_markdown fix_output/PR_SUMMARY.md \
+          --slurpfile fix_report fix_output/fix_report.json \
+          --slurpfile opa_response opa-response.json \
+          '{
+            deployment_id: $deployment_id,
+            repo: $repo,
+            commit: $commit,
+            branch: $branch,
+            tf_workdir: $tf_workdir,
+            pipeline_url: $pipeline_url,
+            opa: {
+              deny: ($opa_response[0].result.deny // true)
+            },
+            summary_markdown: $summary_markdown,
+            fix_report: $fix_report[0]
+          }' > ingress-payload.json
+
+        echo "===== ingress-payload.json ====="
+        cat ingress-payload.json
+
+        curl -k --fail -s -X POST "$CALLBACK_URL" \
+          -H "Content-Type: application/json" \
+          -H "X-CI-Token: $INGRESS_CALLBACK_TOKEN" \
+          -d @ingress-payload.json
+
+        echo "✅ OPA decision + scan summary sent to Ingress"
+
+  # ── Step 7: Log to ELK ───────────────────────────────────────────────────
   - name: log-to-elk
     image: badouralix/curl-jq:latest
     when:
@@ -92,7 +170,7 @@ steps:
         -d @fix_output/fix_report.json
       - cat fix_output/fix_report.json
       - echo "✅ Logs successfully pushed to ELK"
-# ── Step 7: Create Fix PR ─────────────────────────────────────────────────
+# ── Step 8: Create Fix PR ─────────────────────────────────────────────────
   - name: create-fix-pr
     # Thay thế image cũ bằng image Alpine đã tích hợp sẵn Python3 và Git
     image: alpine:3.19

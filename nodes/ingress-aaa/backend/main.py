@@ -27,6 +27,15 @@ from tenants import (
     list_tenant_records,
 )
 
+import uuid
+from iac_repo import push_iac_request_to_gitea
+from deployments import (
+    create_deployment,
+    update_deployment,
+    get_deployment,
+    list_deployments_by_tenant,
+)
+
 KEYCLOAK_INTERNAL_URL = os.getenv("KEYCLOAK_INTERNAL_URL", "http://keycloak:8080/auth")
 KEYCLOAK_PUBLIC_URL = os.getenv("KEYCLOAK_PUBLIC_URL", KEYCLOAK_INTERNAL_URL)
 KEYCLOAK_ADMIN = os.getenv("KEYCLOAK_ADMIN")
@@ -88,6 +97,20 @@ class DeployRequest(BaseModel):
     action: Literal["plan", "apply", "destroy"] = "plan"
     region: str = os.getenv("AWS_DEFAULT_REGION", "us-east-1")
     extra: dict = {}
+    
+class OpaDecision(BaseModel):
+    deny: bool = True
+
+class CiOpaResultRequest(BaseModel):
+    deployment_id: str
+    repo: str | None = None
+    commit: str | None = None
+    branch: str | None = None
+    tf_workdir: str | None = None
+    pipeline_url: str | None = None
+    opa: OpaDecision
+    summary_markdown: str | None = None
+    fix_report: dict = {}
 
 def safe_slug(value: str, max_len: int = 38) -> str:
     value = value.lower().strip()
@@ -738,6 +761,79 @@ def deploy_aws(
             detail=str(e)
         )
         
+@app.post("/deploy/repo")
+def deploy_to_repo(
+    req: DeployRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    roles = get_roles_from_token(current_user)
+
+    if roles.isdisjoint({"admin", "tenant", "deploy_aws", "deploy_openstack"}):
+        raise HTTPException(status_code=403, detail="Insufficient role")
+
+    tenant_id = extract_tenant_id(current_user)
+    provider = resolve_provider(req.resource_type)
+
+    deployment_id = f"dep-{uuid.uuid4().hex[:12]}"
+
+    ingress_public_url = os.getenv("INGRESS_PUBLIC_URL", "").rstrip("/")
+    if not ingress_public_url:
+        raise HTTPException(status_code=500, detail="Missing INGRESS_PUBLIC_URL")
+
+    callback_url = f"{ingress_public_url}/api/ci/opa-result"
+
+    context = {
+        "tenant_id": tenant_id,
+
+        # AWS
+        "aws_region": req.region,
+        "project_name": "hybrid-portal",
+
+        # OpenStack
+        "os_region_name": os.getenv("OS_REGION_NAME", "RegionOne"),
+        "os_auth_url": os.getenv("OS_AUTH_URL", ""),
+
+        **req.extra,
+    }
+
+    tf_file = generate_template(
+        provider=provider,
+        resource_type=req.resource_type,
+        context=context,
+    )
+
+    repo_result = push_iac_request_to_gitea(
+        deployment_id=deployment_id,
+        provider=provider,
+        tenant_id=tenant_id,
+        resource_type=req.resource_type,
+        action=req.action,
+        region=req.region,
+        tf_file=tf_file,
+        callback_url=callback_url,
+    )
+
+    record = create_deployment({
+        "deployment_id": deployment_id,
+        "tenant_id": tenant_id,
+        "provider": provider,
+        "resource_type": req.resource_type,
+        "action": req.action,
+        "region": req.region,
+        "status": "submitted",
+        "user_decision": None,
+        "opa": None,
+        "summary_markdown": None,
+        "fix_report": None,
+        **repo_result,
+    })
+
+    return {
+        "status": "submitted",
+        "message": "IaC template pushed to private repository. CI/CD scan started.",
+        "deployment": record,
+    }        
+
 @app.post("/deploy")
 def deploy(
     req: DeployRequest,
@@ -817,4 +913,123 @@ def deploy(
         "resource_type": req.resource_type,
         "tenant_id": tenant_id,
         **result,
+    }
+    
+@app.post("/ci/opa-result")
+def receive_opa_result(
+    req: CiOpaResultRequest,
+    x_ci_token: str | None = Header(default=None),
+):
+    expected = os.getenv("CI_CALLBACK_TOKEN")
+
+    if not expected:
+        raise HTTPException(status_code=500, detail="Missing CI_CALLBACK_TOKEN")
+
+    if x_ci_token != expected:
+        raise HTTPException(status_code=401, detail="Invalid CI callback token")
+
+    deployment = get_deployment(req.deployment_id)
+
+    if not deployment:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Deployment not found: {req.deployment_id}"
+        )
+
+    deny = req.opa.deny
+    fix_report = req.fix_report or {}
+    summary = fix_report.get("summary", {})
+
+    fixed = int(summary.get("fixed", 0) or 0)
+    manual = int(summary.get("manual", 0) or 0)
+    failed = int(summary.get("failed", 0) or 0)
+    skipped = int(summary.get("skipped", 0) or 0)
+
+    if deny:
+        if fixed > 0:
+            status = "needs_user_fix_decision"
+            recommendation = "Policy denied deployment. Auto-fix is available. Ask user whether to apply/merge the fix."
+        elif manual > 0 or failed > 0 or skipped > 0:
+            status = "blocked_by_policy"
+            recommendation = "Policy denied deployment. Manual review or additional fix rules are required."
+        else:
+            status = "blocked_by_policy"
+            recommendation = "Policy denied deployment."
+    else:
+        status = "waiting_user_approval"
+        recommendation = "Policy passed. Ask user to accept or deny Terraform deployment."
+
+    updated = update_deployment(
+        req.deployment_id,
+        {
+            "status": status,
+            "repo": req.repo or deployment.get("repo"),
+            "commit": req.commit or deployment.get("commit"),
+            "branch": req.branch or deployment.get("branch"),
+            "tf_workdir": req.tf_workdir or deployment.get("tf_workdir"),
+            "pipeline_url": req.pipeline_url,
+            "opa": {
+                "deny": deny,
+            },
+            "summary_markdown": req.summary_markdown,
+            "fix_report": fix_report,
+            "recommendation": recommendation,
+        },
+    )
+
+    return {
+        "status": "received",
+        "deployment": updated,
+    }
+    
+@app.get("/deployments")
+def list_my_deployments(current_user: dict = Depends(get_current_user)):
+    tenant_id = extract_tenant_id(current_user)
+
+    return {
+        "items": list_deployments_by_tenant(tenant_id)
+    }
+
+
+@app.get("/deployments/{deployment_id}")
+def get_my_deployment(
+    deployment_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    tenant_id = extract_tenant_id(current_user)
+    deployment = get_deployment(deployment_id)
+
+    if not deployment:
+        raise HTTPException(status_code=404, detail="Deployment not found")
+
+    if deployment.get("tenant_id") != tenant_id:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    return deployment
+
+@app.post("/deployments/{deployment_id}/deny")
+def deny_deployment(
+    deployment_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    tenant_id = extract_tenant_id(current_user)
+    deployment = get_deployment(deployment_id)
+
+    if not deployment:
+        raise HTTPException(status_code=404, detail="Deployment not found")
+
+    if deployment.get("tenant_id") != tenant_id:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    updated = update_deployment(
+        deployment_id,
+        {
+            "status": "user_denied",
+            "user_decision": "deny",
+        },
+    )
+
+    return {
+        "status": "user_denied",
+        "deployment": updated,
     }
