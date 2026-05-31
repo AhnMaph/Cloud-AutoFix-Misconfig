@@ -51,11 +51,12 @@ steps:
       - >
         jq -n --argjson data "$(cat fix_output/fix_report.json)" '{"input": $data}' > managed_input.json
       # 2. Bắn dữ liệu sang endpoint /main để nhận kết quả rút gọn (allow, deny, summary)
+      
+      - cat managed_input.json
       - >
-        curl --fail -s -X POST http://opa:8181/v1/data/openstack/iac
+        curl --fail -s -X POST http://opa:8181/v1/data/openstack/iac/main
         -H "Content-Type: application/json"
         -d @managed_input.json > opa-response.json
-      - cat managed_input.json
       - cat opa-response.json
 
   # ── Step 6: Log to ELK ───────────────────────────────────────────────────
