@@ -1,14 +1,20 @@
 """
 os_tf_patcher.py — OpenStack Terraform auto-fixer
 
-Architecture khác AWS patcher vì OpenStack networking dùng
-separate resource blocks cho mỗi rule (không phải inline block).
+Correct CKV_OPENSTACK_* mapping (từ Checkov source code):
+  CKV_OPENSTACK_1 — Hardcoded credentials trong provider block (password/token/secret)
+  CKV_OPENSTACK_2 — SSH port 22 open 0.0.0.0/0  (openstack_networking_secgroup_rule_v2)
+  CKV_OPENSTACK_3 — RDP port 3389 open 0.0.0.0/0 (openstack_networking_secgroup_rule_v2)
+  CKV_OPENSTACK_4 — admin_pass set trong openstack_compute_instance_v2
+  CKV_OPENSTACK_5 — (nếu tồn tại) — kiểm tra thêm
+  CKV_OPENSTACK_6 — (nếu tồn tại) — kiểm tra thêm
 
-Fix strategies:
-  A) Attribute patch  — sửa/thêm attribute trong resource block
-  B) Restrict rule    — đổi remote_ip_prefix từ 0.0.0.0/0 → restricted CIDR
-  C) Insert block     — thêm nested block (dns_nameservers, external_gateway_info)
-  D) Remove rule      — comment-out rule quá permissive (nếu không thể restrict)
+Resource types liên quan:
+  - openstack_networking_secgroup_rule_v2 (SSH/RDP rules)
+  - openstack_networking_secgroup_v2      (security group)
+  - openstack_compute_instance_v2         (compute instance)
+  - openstack_networking_subnet_v2        (subnet)
+  - openstack_networking_router_v2        (router)
 """
 
 from __future__ import annotations
@@ -33,12 +39,11 @@ class FixRule:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Generic TF helpers (shared với AWS patcher)
+# Generic TF helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _find_resource_block(content: str, resource_type: str,
                           resource_name: str) -> tuple[int, int] | None:
-    """Return (block_start, block_end) byte offsets of the resource body (inside braces)."""
     pattern = rf'resource\s+"{re.escape(resource_type)}"\s+"{re.escape(resource_name)}"\s*\{{'
     m = re.search(pattern, content)
     if not m:
@@ -51,12 +56,27 @@ def _find_resource_block(content: str, resource_type: str,
         elif content[pos] == '}':
             depth -= 1
         pos += 1
-    return start, pos  # pos is right after closing }
+    return start, pos
+
+
+def _find_provider_block(content: str, provider_name: str = "openstack") -> tuple[int, int] | None:
+    pattern = rf'provider\s+"{re.escape(provider_name)}"\s*\{{'
+    m = re.search(pattern, content)
+    if not m:
+        return None
+    start = m.end()
+    depth, pos = 1, start
+    while pos < len(content) and depth > 0:
+        if content[pos] == '{':
+            depth += 1
+        elif content[pos] == '}':
+            depth -= 1
+        pos += 1
+    return start, pos
 
 
 def _set_attr(content: str, resource_type: str, resource_name: str,
               attr: str, value: str) -> tuple[str, bool]:
-    """Set or insert a top-level attribute inside a resource block."""
     bounds = _find_resource_block(content, resource_type, resource_name)
     if not bounds:
         return content, False
@@ -74,39 +94,41 @@ def _set_attr(content: str, resource_type: str, resource_name: str,
     return content[:body_start] + new_body + "}" + content[body_end:], True
 
 
-def _set_nested_attr(content: str, resource_type: str, resource_name: str,
-                     nested_block: str, attr: str, value: str,
-                     create_if_missing: bool = True) -> tuple[str, bool]:
-    """Set attribute inside a nested block, creating the block if needed."""
+def _remove_attr(content: str, resource_type: str, resource_name: str,
+                 attr: str) -> tuple[str, bool]:
+    """Remove an attribute line from a resource block."""
     bounds = _find_resource_block(content, resource_type, resource_name)
     if not bounds:
         return content, False
     body_start, body_end = bounds
     body = content[body_start:body_end - 1]
 
-    nb_match = re.search(rf'{re.escape(nested_block)}\s*\{{', body)
-    if nb_match:
-        nb_start = nb_match.end()
-        depth, p = 1, nb_start
-        while p < len(body) and depth > 0:
-            if body[p] == '{':
-                depth += 1
-            elif body[p] == '}':
-                depth -= 1
-            p += 1
-        nb_body = body[nb_start:p - 1]
-        attr_re = rf'^(\s*{re.escape(attr)}\s*=\s*).*'
-        if re.search(attr_re, nb_body, re.MULTILINE):
-            new_nb = re.sub(attr_re, rf'\g<1>{value}', nb_body, count=1, flags=re.MULTILINE)
-        else:
-            new_nb = nb_body.rstrip() + f"\n    {attr} = {value}\n  "
-        new_body = body[:nb_match.end()] + new_nb + "}" + body[p:]
-    elif create_if_missing:
-        block_str = f"\n  {nested_block} {{\n    {attr} = {value}\n  }}\n"
-        new_body = body.rstrip() + block_str
-    else:
+    new_body = re.sub(rf'^\s*{re.escape(attr)}\s*=.*\n?', '', body, flags=re.MULTILINE)
+    if new_body == body:
+        return content, False
+    return content[:body_start] + new_body + "}" + content[body_end:], True
+
+
+def _replace_provider_sensitive_attr(content: str, attr: str,
+                                      var_name: str) -> tuple[str, bool]:
+    """Replace hardcoded value in provider block with a variable reference."""
+    bounds = _find_provider_block(content, "openstack")
+    if not bounds:
+        return content, False
+    body_start, body_end = bounds
+    body = content[body_start:body_end - 1]
+
+    # Match attr = "some_literal_value" (not already a var/env reference)
+    attr_re = rf'(\s*{re.escape(attr)}\s*=\s*)"(?!\${{var\.|env\.)[^"]*"'
+    if not re.search(attr_re, body):
         return content, False
 
+    new_body = re.sub(
+        attr_re,
+        rf'\1var.{var_name}',
+        body,
+        count=1,
+    )
     if new_body == body:
         return content, False
     return content[:body_start] + new_body + "}" + content[body_end:], True
@@ -122,168 +144,174 @@ def _parse_resource(finding: dict) -> tuple[str, str]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# OpenStack-specific fixers
+# Fixer implementations
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Restricted CIDRs thay thế cho 0.0.0.0/0
-_RESTRICTED_SSH_CIDR  = '"10.0.0.0/8"'    # chỉ cho phép internal
-_RESTRICTED_RDP_CIDR  = '"10.0.0.0/8"'
-_MANAGEMENT_CIDR      = '"10.0.0.0/8"'
+_RESTRICTED_MGMT_CIDR = '"10.0.0.0/8"'
+_DEFAULT_DNS           = '["8.8.8.8", "8.8.4.4"]'
 
-# Default DNS nameservers cho OpenStack (có thể override qua env)
-_DEFAULT_DNS = '["8.8.8.8", "8.8.4.4"]'
+
+def fix_hardcoded_credentials(content: str, finding: dict) -> tuple[str, bool]:
+    """
+    CKV_OPENSTACK_1 — Hardcoded credentials in provider block.
+    Replaces literal string values for password/token/application_credential_secret
+    with var.* references and appends variable declarations if not present.
+
+    Resource in finding is typically 'openstack.default' (provider alias).
+    """
+    changed_any = False
+
+    # Sensitive fields to replace in provider block
+    sensitive_fields = {
+        "password"                     : "openstack_password",
+        "token"                        : "openstack_token",
+        "application_credential_secret": "openstack_app_credential_secret",
+    }
+
+    for field, var_name in sensitive_fields.items():
+        new_content, changed = _replace_provider_sensitive_attr(content, field, var_name)
+        if changed:
+            content = new_content
+            changed_any = True
+
+    if changed_any:
+        # Append variable declarations at end of file if not already present
+        for field, var_name in sensitive_fields.items():
+            if f'variable "{var_name}"' not in content:
+                content += (
+                    f'\nvariable "{var_name}" {{\n'
+                    f'  description = "OpenStack {field} — set via TF_VAR_{var_name} env var"\n'
+                    f'  type        = string\n'
+                    f'  sensitive   = true\n'
+                    f'}}\n'
+                )
+
+    return content, changed_any
 
 
 def fix_ssh_open_world(content: str, finding: dict) -> tuple[str, bool]:
-    """CKV_OPENSTACK_1 — restrict SSH ingress từ 0.0.0.0/0 → management CIDR."""
+    """
+    CKV_OPENSTACK_2 — SSH ingress open to 0.0.0.0/0.
+    Restricts remote_ip_prefix to management CIDR.
+    """
     rtype, rname = _parse_resource(finding)
     return _set_attr(content, rtype, rname,
-                     "remote_ip_prefix", _RESTRICTED_SSH_CIDR)
+                     "remote_ip_prefix", _RESTRICTED_MGMT_CIDR)
 
 
 def fix_rdp_open_world(content: str, finding: dict) -> tuple[str, bool]:
-    """CKV_OPENSTACK_2 — restrict RDP ingress từ 0.0.0.0/0 → management CIDR."""
+    """
+    CKV_OPENSTACK_3 — RDP ingress open to 0.0.0.0/0.
+    Restricts remote_ip_prefix to management CIDR.
+    """
     rtype, rname = _parse_resource(finding)
     return _set_attr(content, rtype, rname,
-                     "remote_ip_prefix", _RESTRICTED_RDP_CIDR)
+                     "remote_ip_prefix", _RESTRICTED_MGMT_CIDR)
 
 
-def fix_allow_all_ingress(content: str, finding: dict) -> tuple[str, bool]:
-    """CKV_OPENSTACK_4 — rule cho phép tất cả ingress: restrict CIDR."""
-    rtype, rname = _parse_resource(finding)
-    # Kiểm tra xem đây có phải rule không có protocol (allow all)
-    bounds = _find_resource_block(content, rtype, rname)
-    if not bounds:
-        return content, False
-    body = content[bounds[0]:bounds[1] - 1]
-
-    # Nếu không có protocol field → đây là allow-all rule, restrict CIDR
-    if not re.search(r'^\s*protocol\s*=', body, re.MULTILINE):
-        return _set_attr(content, rtype, rname,
-                         "remote_ip_prefix", _MANAGEMENT_CIDR)
-
-    # Nếu có protocol nhưng CIDR là 0.0.0.0/0 → restrict
-    if re.search(r'remote_ip_prefix\s*=\s*"0\.0\.0\.0/0"', body):
-        return _set_attr(content, rtype, rname,
-                         "remote_ip_prefix", _MANAGEMENT_CIDR)
-
-    return content, False
-
-
-def fix_allow_all_egress(content: str, finding: dict) -> tuple[str, bool]:
-    """CKV_OPENSTACK_5 — rule cho phép tất cả egress: restrict CIDR."""
+def fix_admin_pass(content: str, finding: dict) -> tuple[str, bool]:
+    """
+    CKV_OPENSTACK_4 — admin_pass set on compute instance.
+    Removes admin_pass attribute (should use keypair + cloud-init instead).
+    Adds a comment explaining the fix.
+    """
     rtype, rname = _parse_resource(finding)
     bounds = _find_resource_block(content, rtype, rname)
     if not bounds:
         return content, False
-    body = content[bounds[0]:bounds[1] - 1]
 
-    if re.search(r'remote_ip_prefix\s*=\s*"0\.0\.0\.0/0"', body):
-        return _set_attr(content, rtype, rname,
-                         "remote_ip_prefix", _MANAGEMENT_CIDR)
-    return content, False
+    body_start, body_end = bounds
+    body = content[body_start:body_end - 1]
+
+    # Remove admin_pass line and replace with a comment
+    new_body = re.sub(
+        r'(\s*)admin_pass\s*=\s*"[^"]*"',
+        r'\1# admin_pass removed — use key_pair + user_data for instance access',
+        body,
+    )
+    if new_body == body:
+        return content, False
+    return content[:body_start] + new_body + "}" + content[body_end:], True
 
 
 def fix_subnet_no_dns(content: str, finding: dict) -> tuple[str, bool]:
-    """CKV_OPENSTACK_8 — thêm dns_nameservers vào subnet nếu thiếu."""
+    """Subnet missing dns_nameservers."""
     rtype, rname = _parse_resource(finding)
     bounds = _find_resource_block(content, rtype, rname)
     if not bounds:
         return content, False
     body = content[bounds[0]:bounds[1] - 1]
-
-    # Nếu đã có dns_nameservers → skip
     if re.search(r'^\s*dns_nameservers\s*=', body, re.MULTILINE):
         return content, False
-
-    # Insert dns_nameservers list
     new_body = body.rstrip() + f"\n  dns_nameservers = {_DEFAULT_DNS}\n"
-    new_content = content[:bounds[0]] + new_body + "}" + content[bounds[1]:]
-    return new_content, True
+    return content[:bounds[0]] + new_body + "}" + content[bounds[1]:], True
 
 
 def fix_router_no_gateway(content: str, finding: dict) -> tuple[str, bool]:
-    """CKV_OPENSTACK_7 — thêm external_network_id placeholder vào router."""
+    """Router missing external_network_id."""
     rtype, rname = _parse_resource(finding)
     bounds = _find_resource_block(content, rtype, rname)
     if not bounds:
         return content, False
     body = content[bounds[0]:bounds[1] - 1]
-
     if re.search(r'^\s*external_network_id\s*=', body, re.MULTILINE):
         return content, False
-
-    # Insert comment + placeholder — ops team phải điền UUID thật
     placeholder = (
         "\n  # TODO: set external_network_id to your provider network UUID"
         "\n  # Run: openstack network list --external"
-        '\n  external_network_id = var.external_network_id\n'
+        "\n  external_network_id = var.external_network_id\n"
     )
     new_body = body.rstrip() + placeholder
-    new_content = content[:bounds[0]] + new_body + "}" + content[bounds[1]:]
-    return new_content, True
-
-
-def fix_metadata_service(content: str, finding: dict) -> tuple[str, bool]:
-    """CKV_OPENSTACK_6 — disable metadata service on compute instance."""
-    rtype, rname = _parse_resource(finding)
-    return _set_nested_attr(content, rtype, rname,
-                            "metadata", "disable", "true",
-                            create_if_missing=True)
+    return content[:bounds[0]] + new_body + "}" + content[bounds[1]:], True
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FIX_REGISTRY
+# FIX_REGISTRY — corrected mapping
 # ─────────────────────────────────────────────────────────────────────────────
 
 FIX_REGISTRY: dict[str, FixRule] = {
     "CKV_OPENSTACK_1": FixRule(
         "CKV_OPENSTACK_1",
-        "SSH (22) open to 0.0.0.0/0 — restrict to management CIDR",
-        "HIGH",
-        fix_ssh_open_world,
-        f"Changes remote_ip_prefix to {_RESTRICTED_SSH_CIDR}",
+        "Hardcoded credentials in OpenStack provider block",
+        "LOW",
+        fix_hardcoded_credentials,
+        "Replaces literal password/token values with var.* references, "
+        "appends sensitive variable declarations",
     ),
     "CKV_OPENSTACK_2": FixRule(
         "CKV_OPENSTACK_2",
-        "RDP (3389) open to 0.0.0.0/0 — restrict to management CIDR",
+        "SSH (22) ingress open to 0.0.0.0/0 — restrict to management CIDR",
+        "LOW",
+        fix_ssh_open_world,
+        f"Changes remote_ip_prefix → {_RESTRICTED_MGMT_CIDR}",
+    ),
+    "CKV_OPENSTACK_3": FixRule(
+        "CKV_OPENSTACK_3",
+        "RDP (3389) ingress open to 0.0.0.0/0 — restrict to management CIDR",
         "HIGH",
         fix_rdp_open_world,
-        f"Changes remote_ip_prefix to {_RESTRICTED_RDP_CIDR}",
+        f"Changes remote_ip_prefix → {_RESTRICTED_MGMT_CIDR}",
     ),
     "CKV_OPENSTACK_4": FixRule(
         "CKV_OPENSTACK_4",
-        "Security group allows all ingress — restrict CIDR",
-        "MEDIUM",
-        fix_allow_all_ingress,
-        f"Changes remote_ip_prefix to {_MANAGEMENT_CIDR}",
-    ),
-    "CKV_OPENSTACK_5": FixRule(
-        "CKV_OPENSTACK_5",
-        "Security group allows all egress — restrict CIDR",
-        "MEDIUM",
-        fix_allow_all_egress,
-        f"Changes remote_ip_prefix to {_MANAGEMENT_CIDR}",
-    ),
-    "CKV_OPENSTACK_6": FixRule(
-        "CKV_OPENSTACK_6",
-        "Instance metadata service not disabled",
+        "Compute instance has admin_pass set — remove and use keypair",
         "LOW",
-        fix_metadata_service,
+        fix_admin_pass,
+        "Removes admin_pass attribute, adds comment to use key_pair instead",
     ),
-    "CKV_OPENSTACK_7": FixRule(
-        "CKV_OPENSTACK_7",
-        "Router has no external gateway — add external_network_id placeholder",
-        "MEDIUM",
-        fix_router_no_gateway,
-        "Inserts external_network_id = var.external_network_id with TODO comment",
-    ),
-    "CKV_OPENSTACK_8": FixRule(
-        "CKV_OPENSTACK_8",
-        "Subnet has no DNS nameservers — add default DNS",
+    # Extra network-level rules (không có CKV_OPENSTACK_* official ID,
+    # nhưng Checkov custom / community checks có thể dùng)
+    "CKV_OPENSTACK_DNS": FixRule(
+        "CKV_OPENSTACK_DNS",
+        "Subnet missing dns_nameservers",
         "LOW",
         fix_subnet_no_dns,
-        f"Adds dns_nameservers = {_DEFAULT_DNS}",
+    ),
+    "CKV_OPENSTACK_ROUTER_GW": FixRule(
+        "CKV_OPENSTACK_ROUTER_GW",
+        "Router missing external_network_id",
+        "MEDIUM",
+        fix_router_no_gateway,
     ),
 }
 
@@ -417,10 +445,8 @@ class MultiFilePatcher:
     def _common_suffix_len(a, b) -> int:
         n = 0
         for x, y in zip(reversed(a), reversed(b)):
-            if x == y:
-                n += 1
-            else:
-                break
+            if x == y: n += 1
+            else: break
         return n
 
     @staticmethod

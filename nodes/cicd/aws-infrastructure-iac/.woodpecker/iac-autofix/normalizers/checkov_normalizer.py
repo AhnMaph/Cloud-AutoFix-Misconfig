@@ -2,27 +2,30 @@
 
 from __future__ import annotations
 
-# Offline severity fallback — Checkov OSS trả về null cho severity
-SEVERITY_MAP = {
-    # EC2
-    "CKV_AWS_8"  : "HIGH",    "CKV_AWS_28" : "MEDIUM",  "CKV_AWS_79" : "MEDIUM",
-    "CKV_AWS_126": "LOW",     "CKV_AWS_135": "LOW",
-    # S3
-    "CKV_AWS_18" : "LOW",     "CKV_AWS_19" : "HIGH",    "CKV_AWS_20" : "HIGH",
-    "CKV_AWS_52" : "MEDIUM",  "CKV_AWS_53" : "HIGH",    "CKV_AWS_54" : "HIGH",
-    "CKV_AWS_55" : "LOW",     "CKV_AWS_56" : "LOW",
-    # RDS
-    "CKV_AWS_16" : "HIGH",    "CKV_AWS_17" : "HIGH",    "CKV_AWS_23" : "LOW",
-    "CKV_AWS_129": "LOW",     "CKV_AWS_133": "LOW",
-    # IAM
-    "CKV_AWS_1"  : "HIGH",    "CKV_AWS_40" : "HIGH",    "CKV_AWS_274": "LOW",
-    # Security Group
-    "CKV_AWS_24" : "HIGH",    "CKV_AWS_25" : "HIGH",    "CKV_AWS_260": "LOW",
-    # EBS
-    "CKV_AWS_3"  : "HIGH",
-    # CloudTrail
-    "CKV_AWS_35" : "LOW",     "CKV_AWS_36" : "LOW",     "CKV_AWS_67" : "LOW",
-}
+import json
+from pathlib import Path
+
+# Checkov OSS trả null cho severity → tra cứu static map theo check_id
+_MAPPINGS_PATH = Path(__file__).resolve().parent.parent.parent / "checkov_severity_mappings.json"
+VALID_SEVERITIES = frozenset({"INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"})
+
+
+def _load_severity_mappings() -> dict[str, str]:
+    with open(_MAPPINGS_PATH, encoding="utf-8") as f:
+        data = json.load(f)
+    return data.get("mappings", {})
+
+
+SEVERITY_MAP: dict[str, str] = _load_severity_mappings()
+
+
+def resolve_severity(raw_sev: str | None, check_id: str) -> str:
+    """Return Checkov severity when valid; otherwise map by check_id or UNKNOWN."""
+    if raw_sev and isinstance(raw_sev, str):
+        normalized = raw_sev.strip().upper()
+        if normalized in VALID_SEVERITIES:
+            return normalized
+    return SEVERITY_MAP.get(check_id, "UNKNOWN")
 
 
 def normalize_checkov(data: dict | list) -> list[dict]:
@@ -39,11 +42,7 @@ def normalize_checkov(data: dict | list) -> list[dict]:
 
         for chk in failed_checks:
             check_id = chk.get("check_id", "UNKNOWN")
-
-            # Checkov OSS trả null → fallback sang SEVERITY_MAP
-            raw_sev  = chk.get("severity")
-            severity = (raw_sev.upper() if raw_sev else None) \
-                       or SEVERITY_MAP.get(check_id, "UNKNOWN")
+            severity = resolve_severity(chk.get("severity"), check_id)
 
             file_path  = chk.get("repo_file_path") or chk.get("file_path", "UNKNOWN")
             resource   = chk.get("resource", "UNKNOWN")

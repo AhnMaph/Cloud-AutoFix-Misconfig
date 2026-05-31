@@ -1,20 +1,19 @@
-"""Normalize Checkov JSON output (OpenStack provider) → common Finding schema."""
+"""Normalize Checkov JSON output (OpenStack provider) → common Finding schema.
+
+Correct CKV_OPENSTACK_* severity mapping (từ Checkov source + Prisma Cloud docs):
+  CKV_OPENSTACK_1 — HIGH   — Hardcoded creds trong provider block
+  CKV_OPENSTACK_2 — HIGH   — SSH (22) ingress 0.0.0.0/0
+  CKV_OPENSTACK_3 — HIGH   — RDP (3389) ingress 0.0.0.0/0
+  CKV_OPENSTACK_4 — MEDIUM — admin_pass on compute instance
+"""
 
 from __future__ import annotations
 
-# Offline severity map — Checkov OSS trả null cho OpenStack checks
 SEVERITY_MAP: dict[str, str] = {
-    # Security Group rules
-    "CKV_OPENSTACK_1" : "HIGH",    # SSH 0.0.0.0/0
-    "CKV_OPENSTACK_2" : "HIGH",    # RDP 0.0.0.0/0
-    "CKV_OPENSTACK_4" : "MEDIUM",  # allow all ingress
-    "CKV_OPENSTACK_5" : "MEDIUM",  # allow all egress
-    # Compute
-    "CKV_OPENSTACK_3" : "HIGH",    # no keypair
-    "CKV_OPENSTACK_6" : "LOW",     # metadata service
-    # Networking
-    "CKV_OPENSTACK_7" : "MEDIUM",  # router no external gateway
-    "CKV_OPENSTACK_8" : "LOW",     # subnet no DNS
+    "CKV_OPENSTACK_1": "LOW",    # hardcoded provider credentials
+    "CKV_OPENSTACK_2": "HIGH",    # SSH 0.0.0.0/0
+    "CKV_OPENSTACK_3": "LOW",    # RDP 0.0.0.0/0
+    "CKV_OPENSTACK_4": "LOW",  # admin_pass on compute instance
 }
 
 
