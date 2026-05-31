@@ -1,0 +1,92 @@
+# .woodpecker/iac-pipeline.yml
+#
+# Prerequisites (Woodpecker UI → Repo Settings → Secrets):
+#   GITEA_TOKEN  — Personal Access Token với quyền repo:write + issue:write
+#   GITEA_URL    — http://192.168.154.129:3000   (hoặc domain Gitea của bạn)
+#
+# Woodpecker tự inject CI_REPO_OWNER, CI_REPO_NAME, CI_COMMIT_BRANCH
+# vào mọi step — không cần khai báo thêm.
+
+when:
+  event: [push, pull_request]
+  # Chỉ chạy auto-fix + PR khi push lên main/develop, không phải branch autofix/*
+  # (tránh vòng lặp vô hạn)
+  branch:
+    exclude: [autofix/*]
+
+variables:
+  # Dùng lại image string ở nhiều chỗ
+  - &python_image  python:3.11-slim
+  - &fix_dir       fix_output
+
+steps:
+  # ── Step 1: Checkov scan ──────────────────────────────────────────────────
+  - name: checkov-scan
+    image: bridgecrew/checkov:latest
+    commands:
+      - >
+        checkov -d . --framework terraform
+        --output json --soft-fail
+        > checkov-results.json
+      - echo "✅ Checkov scan done"
+
+  # ── Step 4: IaC Auto-Fix ─────────────────────────────────────────────────
+  - name: iac-autofix
+    image: *python_image
+    commands:
+      - pip install -q colorama
+      - echo "🛠️ Running IaC Auto-Fix Framework..."
+      - >
+        python .woodpecker/iac-autofix/autofix.py
+        --tf-dir .
+        --checkov checkov-results.json
+        --out-dir fix_output
+        --severity LOW,MEDIUM
+      - cat fix_output/PR_SUMMARY.md
+  # ── Step 5: OPA policy check ─────────────────────────────────────────────
+  - name: opa-policy-check
+    image: badouralix/curl-jq:latest
+    commands:
+      - curl -i -s http://opa:8181/health || (echo "❌ OPA Server sập nguồn hoặc sai cấu hình mạng!"; exit 1)
+      - >
+        jq -n --argjson data "$(cat fix_output/fix_report.json)" '{"input": $data}' > managed_input.json
+      # 2. Bắn dữ liệu sang endpoint /main để nhận kết quả rút gọn (allow, deny, summary)
+      - >
+        curl --fail -s -X POST http://opa:8181/v1/data/openstack/iac
+        -H "Content-Type: application/json"
+        -d @managed_input.json > opa-response.json
+      - cat managed_input.json
+      - cat opa-response.json
+
+  # ── Step 6: Log to ELK ───────────────────────────────────────────────────
+  - name: log-to-elk
+    image: badouralix/curl-jq:latest
+    when:
+      status: [success, failure]
+    commands:
+      - echo "📤 Sending metrics to ELK Logstash..."
+      - >
+        curl --fail -s -X POST http://logstash:5055
+        -H "Content-Type: application/json"
+        -d @fix_output/fix_report.json
+      - cat fix_output/fix_report.json
+      - echo "✅ Logs successfully pushed to ELK"
+# ── Step 7: Create Fix PR ─────────────────────────────────────────────────
+  - name: create-fix-pr
+    # Thay thế image cũ bằng image Alpine đã tích hợp sẵn Python3 và Git
+    image: alpine:3.19
+    when:
+      event: push
+      status: success
+    environment:
+      GITEA_URL:
+        from_secret: GITEA_URL
+      GITEA_TOKEN:
+        from_secret: GITEA_TOKEN
+    commands:
+      # Alpine dùng 'apk' cài git và python chỉ mất đúng 1 giây, không cần update mỏi mắt
+      - apk add --no-cache git python3
+      
+      - git config --global --add safe.directory '*'
+      - echo "🚀 Creating fix PR if fixes were applied..."
+      - python3 .woodpecker/iac-autofix/gitea_pr.py --fix-dir fix_output --report-json fix_output/fix_report.json --report-md fix_output/PR_SUMMARY.md
