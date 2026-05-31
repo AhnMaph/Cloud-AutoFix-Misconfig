@@ -1,0 +1,87 @@
+terraform {
+  required_providers {
+    openstack = {
+      source  = "terraform-provider-openstack/openstack"
+      version = ">= 2.1.0"
+    }
+  }
+}
+
+provider "openstack" {}
+
+variable "tenant_id" {
+  type    = string
+  default = "{{ tenant_id }}"
+}
+
+variable "vm_name" {
+  type    = string
+  default = "{{ vm_name | default('demo-vm') }}"
+}
+
+variable "image_name" {
+  type    = string
+  default = "{{ image_name | default('cirros') }}"
+}
+
+variable "flavor_name" {
+  type    = string
+  default = "{{ flavor_name | default('m1.tiny') }}"
+}
+
+variable "network_name" {
+  type    = string
+  default = "{{ network_name | default('public-net') }}"
+}
+
+resource "openstack_networking_secgroup_v2" "tenant_vm_sg" {
+  name        = "${var.tenant_id}-${var.vm_name}-sg"
+  description = "Security group for ${var.tenant_id} VM"
+}
+
+resource "openstack_networking_secgroup_rule_v2" "allow_icmp" {
+  direction         = "ingress"
+  ethertype         = "IPv4"
+  protocol          = "icmp"
+  security_group_id = openstack_networking_secgroup_v2.tenant_vm_sg.id
+}
+
+resource "openstack_networking_secgroup_rule_v2" "allow_ssh" {
+  direction         = "ingress"
+  ethertype         = "IPv4"
+  protocol          = "tcp"
+  port_range_min    = 22
+  port_range_max    = 22
+  security_group_id = openstack_networking_secgroup_v2.tenant_vm_sg.id
+}
+
+resource "openstack_compute_instance_v2" "tenant_vm" {
+  name        = "${var.tenant_id}-${var.vm_name}"
+  image_name  = var.image_name
+  flavor_name = var.flavor_name
+
+  security_groups = [
+    openstack_networking_secgroup_v2.tenant_vm_sg.name
+  ]
+
+  network {
+    name = var.network_name
+  }
+
+  metadata = {
+    tenant     = var.tenant_id
+    managed_by = "hybrid-cloud-portal"
+  }
+}
+
+output "vm_id" {
+  value = openstack_compute_instance_v2.tenant_vm.id
+}
+
+output "vm_name" {
+  value = openstack_compute_instance_v2.tenant_vm.name
+}
+
+output "access_ip_v4" {
+  value = openstack_compute_instance_v2.tenant_vm.access_ip_v4
+}
