@@ -6,11 +6,6 @@
   "ssoSessionMaxLifespan": 2592000,
   "clientSessionIdleTimeout": 2592000,
   "clientSessionMaxLifespan": 2592000,
-  "accessTokenLifespan": 3600,
-  "ssoSessionIdleTimeout": 2592000,
-  "ssoSessionMaxLifespan": 2592000,
-  "clientSessionIdleTimeout": 2592000,
-  "clientSessionMaxLifespan": 2592000,
   "roles": {
     "realm": [
       { "name": "tenant", "description": "Base role cho tất cả thành viên thuộc các phòng ban" },
