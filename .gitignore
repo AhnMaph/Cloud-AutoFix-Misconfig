@@ -70,3 +70,7 @@ nodes/cicd/data/*
 
 digest.txt
 deploy-repo.json
+tenant-s3-policy.json
+trust-vault-broker.json
+server.crt
+server.key

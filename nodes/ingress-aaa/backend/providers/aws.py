@@ -38,7 +38,7 @@ def safe_slug(value: str) -> str:
 
 def get_tenant_role_name(tenant_id: str) -> str:
     tenant_slug = safe_slug(tenant_id)
-    return f"{tenant_slug}-deploy-role"
+    return f"hybridcompany-{tenant_slug}-deploy-role"
 
 
 def get_tenant_role_arn(tenant_id: str, aws_account_id: str) -> str:
@@ -57,13 +57,20 @@ def create_tenant_iam_role(tenant_id: str, aws_account_id: str) -> dict:
 
     iam = boto3.client("iam")
 
+    vault_broker_user = os.getenv("VAULT_BROKER_AWS_USER", "vault-aws-broker")
+    vault_broker_arn = os.getenv(
+        "VAULT_BROKER_AWS_PRINCIPAL_ARN",
+        f"arn:aws:iam::{aws_account_id}:user/{vault_broker_user}",
+    )
+
     trust_policy = {
         "Version": "2012-10-17",
         "Statement": [
             {
+                "Sid": "TrustVaultBrokerUser",
                 "Effect": "Allow",
                 "Principal": {
-                    "AWS": f"arn:aws:iam::{aws_account_id}:root"
+                    "AWS": vault_broker_arn
                 },
                 "Action": "sts:AssumeRole"
             }

@@ -6,37 +6,50 @@
   "ssoSessionMaxLifespan": 2592000,
   "clientSessionIdleTimeout": 2592000,
   "clientSessionMaxLifespan": 2592000,
+  "accessTokenLifespan": 3600,
+  "ssoSessionIdleTimeout": 2592000,
+  "ssoSessionMaxLifespan": 2592000,
+  "clientSessionIdleTimeout": 2592000,
+  "clientSessionMaxLifespan": 2592000,
   "roles": {
     "realm": [
-      {
-        "name": "tenant"
-      },
-      {
-        "name": "deploy_aws"
-      },
-      {
-        "name": "deploy_openstack"
-      },
-      {
-        "name": "view_resource"
-      },
-      {
-        "name": "remediate_iac"
-      },
-      {
-        "name": "admin"
-      }
+      { "name": "tenant", "description": "Base role cho tất cả thành viên thuộc các phòng ban" },
+      { "name": "deploy_aws", "description": "Quyền yêu cầu cấp Temporary Credentials từ AWS STS" },
+      { "name": "deploy_openstack", "description": "Quyền deploy vào cụm Private Cloud OpenStack nội bộ" },
+      { "name": "view_resource", "description": "Quyền đọc và giám sát tài nguyên Cloud (Read-only)" },
+      { "name": "remediate_iac", "description": "Quyền kích hoạt tự động sửa lỗi cấu hình sai (IaC Auto-remediation)" },
+      { "name": "admin", "description": "Quyền Quản trị viên toàn hệ thống Hybrid Cloud" }
     ]
   },
   "groups": [
     {
       "name": "tenants",
+      "path": "/tenants",
+      "realmRoles": ["tenant"],
+      "subGroups": []
+    },
+    {
+      "name": "departments",
+      "path": "/departments",
+      "realmRoles": [ "tenant" ],
       "subGroups": [
         {
-          "name": "tenant-a"
+          "name": "dept-generic-dev",
+          "path": "/departments/dept-generic-dev",
+          "attributes": {
+            "target-cloud": [ "hybrid" ],
+            "environment": [ "dev" ]
+          },
+          "realmRoles": [ "deploy_aws", "deploy_openstack", "view_resource" ]
         },
         {
-          "name": "tenant-b"
+          "name": "dept-generic-prod",
+          "path": "/departments/dept-generic-prod",
+          "attributes": {
+            "target-cloud": [ "hybrid" ],
+            "environment": [ "prod" ]
+          },
+          "realmRoles": [ "deploy_aws", "deploy_openstack", "remediate_iac", "view_resource" ]
         }
       ]
     }
@@ -53,19 +66,103 @@
       "implicitFlowEnabled": false,
       "serviceAccountsEnabled": false,
       "redirectUris": [
-        "https://100.21.43.100/*",
-        "http://100.21.43.100/*",
+        "https://192.168.2.100/*",
+        "http://192.168.2.100/*",
         "http://localhost:5173/*"
       ],
       "webOrigins": [
-        "https://100.21.43.100",
-        "http://100.21.43.100",
+        "https://192.168.2.100",
+        "http://192.168.2.100",
         "http://localhost:5173"
       ],
       "attributes": {
         "pkce.code.challenge.method": "S256",
         "access.token.lifespan": "3600"
-      }
+      },
+      "protocolMappers": [
+        {
+          "name": "groups-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "consentRequired": false,
+          "config": {
+            "full.path": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "groups",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "roles-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "multivalued": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "roles",
+            "jsonType.label": "String"
+          }
+        },
+        {
+          "name": "env-attribute-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-user-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "environment",
+            "claim.name": "env",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "jsonType.label": "String",
+            "multivalued": "false"
+          }
+        },
+        {
+          "name": "cloud-target-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-user-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "target-cloud",
+            "claim.name": "cloud_target",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "jsonType.label": "String",
+            "multivalued": "false"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "aws-pipeline-client",
+      "name": "AWS Pipeline Automation",
+      "description": "Client cấp quyền cho CI/CD Pipeline lấy AWS STS Token",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "protocolMappers": [
+        {
+          "name": "roles-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "multivalued": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "roles",
+            "jsonType.label": "String"
+          }
+        }
+      ]
     }
   ]
 }

@@ -19,6 +19,18 @@ import jwt
 from jwt import PyJWKClient
 from typing import Literal
 
+from providers.aws import (
+    create_tenant_iam_role,
+    terraform_aws_deploy,
+    assume_tenant_role,
+)
+
+from providers.vault import (
+    write_cloud_token,
+    read_cloud_token,
+    provision_vault_aws_for_tenant,
+)
+
 from providers.aws import create_tenant_iam_role, terraform_aws_deploy
 from providers.openstack import create_tenant_project, terraform_openstack_deploy
 try:
@@ -118,6 +130,12 @@ class DeployRequest(BaseModel):
     region: str = os.getenv("AWS_DEFAULT_REGION", "us-east-1")
     extra: dict = {}
     
+class PipelineCloudTokenRequest(BaseModel):
+    tenant_id: str
+    request_id: str
+    provider: Literal["aws"] = "aws"
+    region: str = os.getenv("AWS_DEFAULT_REGION", "us-east-1")
+    
 class OpaDecision(BaseModel):
     deny: bool = True
 
@@ -142,6 +160,11 @@ def safe_slug(value: str, max_len: int = 38) -> str:
 
     return value[:max_len]
 
+class VaultCloudTokenRequest(BaseModel):
+    tenant_id: str
+    request_id: str
+    provider: Literal["aws"] = "aws"
+    region: str = os.getenv("AWS_DEFAULT_REGION", "us-east-1")
 
 def generate_tenant_id(username: str) -> str:
     """
@@ -601,12 +624,21 @@ def register(req: RegisterRequest):
                 aws_account_id=aws_account_id,
             )
 
+            vault_provision = provision_vault_aws_for_tenant(tenant_id)
+
             tenant_record = update_tenant_record(
                 tenant_id,
                 {
                     "aws": {
                         "role_name": aws_role["role_name"],
                         "role_arn": aws_role["role_arn"],
+                        "provisioned": True,
+                        "last_error": None,
+                    },
+                    "vault": {
+                        "aws_role": vault_provision["vault_aws_role"],
+                        "jwt_role": vault_provision["vault_jwt_role"],
+                        "policy": vault_provision["vault_policy"],
                         "provisioned": True,
                         "last_error": None,
                     }
@@ -971,6 +1003,67 @@ def deploy(
         "resource_type": req.resource_type,
         "tenant_id": tenant_id,
         **result,
+    }
+    
+@app.post("/internal/vault/issue-cloud-token")
+def issue_cloud_token_to_vault(req: VaultCloudTokenRequest):
+    aws_account_id = os.getenv("AWS_ACCOUNT_ID")
+
+    if not aws_account_id:
+        raise HTTPException(status_code=500, detail="Missing AWS_ACCOUNT_ID")
+
+    if req.provider != "aws":
+        raise HTTPException(status_code=400, detail="Only AWS is supported for now")
+
+    try:
+        creds = assume_tenant_role(
+            tenant_id=req.tenant_id,
+            aws_account_id=aws_account_id,
+        )
+
+        secret_data = {
+            "provider": "aws",
+            "tenant_id": req.tenant_id,
+            "request_id": req.request_id,
+            "region": req.region,
+            "AWS_ACCESS_KEY_ID": creds["AWS_ACCESS_KEY_ID"],
+            "AWS_SECRET_ACCESS_KEY": creds["AWS_SECRET_ACCESS_KEY"],
+            "AWS_SESSION_TOKEN": creds["AWS_SESSION_TOKEN"],
+            "AWS_DEFAULT_REGION": req.region,
+        }
+
+        vault_result = write_cloud_token(
+            request_id=req.request_id,
+            data=secret_data,
+        )
+
+        return {
+            "status": "stored",
+            "provider": "aws",
+            "tenant_id": req.tenant_id,
+            "request_id": req.request_id,
+            "vault_path": vault_result["vault_path"],
+            "message": "AWS STS credential stored in Vault before pipeline scan",
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+@app.get("/internal/vault/cloud-token/{request_id}")
+def get_cloud_token_from_vault(request_id: str):
+    data = read_cloud_token(request_id)
+
+    return {
+        "status": "ok",
+        "request_id": request_id,
+        "provider": data.get("provider"),
+        "tenant_id": data.get("tenant_id"),
+        "credentials": {
+            "AWS_ACCESS_KEY_ID": data.get("AWS_ACCESS_KEY_ID"),
+            "AWS_SECRET_ACCESS_KEY": data.get("AWS_SECRET_ACCESS_KEY"),
+            "AWS_SESSION_TOKEN": data.get("AWS_SESSION_TOKEN"),
+            "AWS_DEFAULT_REGION": data.get("AWS_DEFAULT_REGION"),
+        },
     }
     
 @app.post("/ci/opa-result")

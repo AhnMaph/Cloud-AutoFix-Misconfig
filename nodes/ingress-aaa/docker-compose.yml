@@ -4,7 +4,7 @@ services:
     container_name: ingress-control
     ports:
       - "80:80"
-      - "443:443"
+      # - "443:443"
     volumes:
       - ./ingress/nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - ./ingress/certs:/etc/nginx/certs:ro 
@@ -24,6 +24,8 @@ services:
       KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN}
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
 
+      KC_PROXY: edge
+      KC_HOSTNAME: hybridcompany.xyz  # Hoặc remi.hybridcompany.xyz nếu bạn dùng subdomain
       KC_HTTP_ENABLED: "true"
       KC_HTTP_RELATIVE_PATH: /auth
 
@@ -36,6 +38,40 @@ services:
     networks:
       - portal-net
     restart: unless-stopped
+
+  vault:
+    image: hashicorp/vault:latest
+    container_name: vault
+    restart: unless-stopped
+    cap_add:
+      - IPC_LOCK
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: ${VAULT_ROOT_TOKEN:-root}
+      VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+    ports:
+      - "8200:8200"
+    networks:
+      - portal-net
+
+  vault-bootstrap:
+    image: hashicorp/vault:latest
+    container_name: vault-bootstrap
+    depends_on:
+      - vault
+      - keycloak
+    environment:
+      VAULT_ADDR: http://vault:8200
+      VAULT_TOKEN: ${VAULT_TOKEN:-root}
+      AWS_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+      VAULT_BROKER_AWS_ACCESS_KEY_ID: ${VAULT_BROKER_AWS_ACCESS_KEY_ID}
+      VAULT_BROKER_AWS_SECRET_ACCESS_KEY: ${VAULT_BROKER_AWS_SECRET_ACCESS_KEY}
+      KEYCLOAK_ISSUER: https://hybridcompany.xyz/auth/realms/hybrid-cloud
+    volumes:
+      - ./vault/bootstrap_vault_aws.sh:/bootstrap_vault_aws.sh:ro
+    command: sh /bootstrap_vault_aws.sh
+    networks:
+      - portal-net
+    restart: "no"
 
   backend:
     build:
@@ -71,6 +107,12 @@ services:
       OS_PROJECT_NAME: ${OS_PROJECT_NAME:-admin}
       OS_PROJECT_DOMAIN_NAME: ${OS_PROJECT_DOMAIN_NAME:-Default}
       OS_REGION_NAME: ${OS_REGION_NAME:-RegionOne}
+      
+      VAULT_ADDR: http://vault:8200
+      VAULT_TOKEN: ${VAULT_TOKEN:-root}
+      VAULT_BROKER_AWS_USER: vault-aws-broker
+      KEYCLOAK_PIPELINE_CLIENT_ID: aws-pipeline-client
+      KEYCLOAK_PIPELINE_AUDIENCE: account
 
       GITEA_URL: ${GITEA_URL}
       GITEA_OWNER: ${GITEA_OWNER}
