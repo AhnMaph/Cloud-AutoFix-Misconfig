@@ -205,6 +205,9 @@ def seed_tenant_repo_from_template(provider: str, tenant_repo: str):
         shutil.rmtree(repo_dir / ".git", ignore_errors=True)
         clean_seed_repo(repo_dir)
 
+        # Add CI/CD pipeline config from cicd template repo
+        copy_pipeline_files(provider, repo_dir)
+
         run_cmd(["git", "init"], cwd=repo_dir)
         run_cmd(["git", "checkout", "-b", "main"], cwd=repo_dir)
         run_cmd(["git", "config", "user.name", "Hybrid Cloud Portal Bot"], cwd=repo_dir)
@@ -573,6 +576,54 @@ def configure_woodpecker_repo(repo: str, provider: str) -> dict | None:
     repo_id = wp_repo["id"]
     
     repair_woodpecker_repo(repo_id)
+    
+    tenant_id = repo.rsplit("_", 1)[0]
+
+    # Pipeline needs to call Keycloak/Vault from the Woodpecker VM.
+    upsert_woodpecker_secret(
+        repo_id,
+        "KEYCLOAK_TOKEN_URL",
+        os.getenv(
+            "PIPELINE_KEYCLOAK_TOKEN_URL",
+            "http://192.168.2.100/auth/realms/hybrid-cloud/protocol/openid-connect/token",
+        ),
+    )
+
+    upsert_woodpecker_secret(
+        repo_id,
+        "KEYCLOAK_CLIENT_ID",
+        os.getenv("KEYCLOAK_PIPELINE_CLIENT_ID", "aws-pipeline-client"),
+    )
+
+    upsert_woodpecker_secret(
+        repo_id,
+        "KEYCLOAK_CLIENT_SECRET",
+        os.getenv("KEYCLOAK_PIPELINE_CLIENT_SECRET", ""),
+    )
+
+    upsert_woodpecker_secret(
+        repo_id,
+        "VAULT_ADDR",
+        os.getenv("PIPELINE_VAULT_ADDR", "http://192.168.2.100:8200"),
+    )
+
+    upsert_woodpecker_secret(
+        repo_id,
+        "VAULT_JWT_ROLE",
+        f"{tenant_id}-pipeline",
+    )
+
+    upsert_woodpecker_secret(
+        repo_id,
+        "VAULT_AWS_ROLE",
+        f"{tenant_id}-deploy",
+    )
+
+    upsert_woodpecker_secret(
+        repo_id,
+        "AWS_DEFAULT_REGION",
+        os.getenv("AWS_DEFAULT_REGION", "us-east-1"),
+    )
 
     # Common secrets for all tenant repos.
     upsert_woodpecker_secret(repo_id, "GITEA_URL", "http://gitea:3000")
@@ -668,6 +719,40 @@ def template_dir_for_provider(provider: str) -> Path:
         return Path(required_env("IAC_TEMPLATE_DIR_OPENSTACK"))
 
     raise RuntimeError(f"Unsupported provider: {provider}")
+
+def pipeline_template_dir_for_provider(provider: str) -> Path | None:
+    if provider == "aws":
+        value = os.getenv("IAC_PIPELINE_TEMPLATE_DIR_AWS")
+    elif provider == "openstack":
+        value = os.getenv("IAC_PIPELINE_TEMPLATE_DIR_OPENSTACK")
+    else:
+        raise RuntimeError(f"Unsupported provider: {provider}")
+
+    if not value:
+        return None
+
+    return Path(value)
+
+
+def copy_pipeline_files(provider: str, repo_dir: Path):
+    """
+    Copy .woodpecker pipeline config từ CICD template repo vào tenant repo.
+    Service template vẫn lấy từ IAC_TEMPLATE_DIR_AWS / OPENSTACK.
+    """
+    pipeline_src = pipeline_template_dir_for_provider(provider)
+
+    if not pipeline_src:
+        return
+
+    if not pipeline_src.exists():
+        raise RuntimeError(f"Pipeline template directory not found: {pipeline_src}")
+
+    target = repo_dir / ".woodpecker"
+
+    if target.exists():
+        shutil.rmtree(target, ignore_errors=True)
+
+    shutil.copytree(pipeline_src, target)
 
 def split_repo_full_name(repo_full_name: str) -> tuple[str, str]:
     """

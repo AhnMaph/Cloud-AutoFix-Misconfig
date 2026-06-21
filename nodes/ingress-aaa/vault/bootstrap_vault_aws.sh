@@ -22,7 +22,7 @@ vault auth enable jwt 2>/dev/null || true
 
 echo "[4/4] Configure Vault JWT auth with Keycloak issuer"
 vault write auth/jwt/config \
-  oidc_discovery_url="$KEYCLOAK_ISSUER" \
-  bound_issuer="$KEYCLOAK_ISSUER"
+  jwks_url="http://keycloak:8080/auth/realms/hybrid-cloud/protocol/openid-connect/certs" \
+  bound_issuer="https://hybridcompany.xyz/auth/realms/hybrid-cloud"
 
 echo "✅ Vault global AWS/JWT bootstrap completed"

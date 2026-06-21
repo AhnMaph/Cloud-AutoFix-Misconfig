@@ -79,13 +79,14 @@ services:
     container_name: portal-backend
     environment:
       KEYCLOAK_INTERNAL_URL: http://keycloak:8080/auth
-      KEYCLOAK_PUBLIC_URL: https://${SERVER_IP}/auth
+      KEYCLOAK_PUBLIC_URL: https://hybridcompany.xyz/auth
+      KEYCLOAK_ISSUER: http://hybridcompany.xyz:8080/auth/realms/hybrid-cloud
       KEYCLOAK_REALM: ${KEYCLOAK_REALM}
       KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID}
       KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN}
       KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
-      FRONTEND_URL: https://${SERVER_IP}
-      CORS_ORIGINS: https://${SERVER_IP},http://localhost:5173
+      FRONTEND_URL: https://hybridcompany.xyz
+      CORS_ORIGINS: https://hybridcompany.xyz,http://localhost:5173
       SESSION_MAX_AGE_SECONDS: "2592000"
       COOKIE_SECURE: "true"
       COOKIE_SAMESITE: lax
@@ -131,6 +132,13 @@ services:
       IAC_TEMPLATE_DIR_AWS: ${IAC_TEMPLATE_DIR_AWS}
       IAC_TEMPLATE_DIR_OPENSTACK: ${IAC_TEMPLATE_DIR_OPENSTACK}
 
+      IAC_PIPELINE_TEMPLATE_DIR_AWS: /iac-templates/aws-infrastructure-iac/.woodpecker
+      IAC_PIPELINE_TEMPLATE_DIR_OPENSTACK: /iac-templates/openstack-infrastructure-iac/.woodpecker
+
+      PIPELINE_KEYCLOAK_TOKEN_URL: ${PIPELINE_KEYCLOAK_TOKEN_URL}
+      PIPELINE_VAULT_ADDR: ${PIPELINE_VAULT_ADDR}
+      KEYCLOAK_PIPELINE_CLIENT_SECRET: ${KEYCLOAK_PIPELINE_CLIENT_SECRET}
+
       CI_CALLBACK_TOKEN: ${CI_CALLBACK_TOKEN}
       DEPLOYMENT_STORE_PATH: ${DEPLOYMENT_STORE_PATH:-/app/data/deployments.json}
       INGRESS_PUBLIC_URL: ${INGRESS_PUBLIC_URL}
@@ -148,11 +156,11 @@ services:
     build:
       context: ./frontend
       args:
-        VITE_KEYCLOAK_URL: https://${SERVER_IP}/auth
+        VITE_KEYCLOAK_URL: /auth
         VITE_KEYCLOAK_REALM: ${KEYCLOAK_REALM}
         VITE_KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID}
-        VITE_BACKEND_URL: https://${SERVER_IP}/api
-        VITE_FRONTEND_URL: https://${SERVER_IP}
+        VITE_BACKEND_URL: /api
+        VITE_FRONTEND_URL: https://hybridcompany.xyz
     container_name: portal-frontend
     depends_on:
       - backend

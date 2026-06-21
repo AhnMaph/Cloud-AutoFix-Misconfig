@@ -41,18 +41,34 @@ steps:
       AWS_DEFAULT_REGION:
         from_secret: AWS_DEFAULT_REGION
     commands:
-      - python .woodpecker/fetcher/fetch_aws_creds_from_vault.py > .env.cloud
-      - chmod 600 .env.cloud
-      - echo "✅ AWS temporary credentials fetched from Vault before scan"
+      - umask 022
+      - python .woodpecker/iac-autofix/fetcher/fetch_aws_creds_from_vault.py > .env.cloud
+      - chmod 0644 .env.cloud
+      - test -r .env.cloud
+      - ls -la .env.cloud
+
+  - name: prepare-pipeline-context
+    image: *iac_image
+    pull: false
+    commands:
+      - test -f deploy-meta.json
+      - TF_WORKDIR=$(sed -n 's/.*"tf_workdir"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' deploy-meta.json | head -1)
+      - test -n "$TF_WORKDIR"
+      - test -f "$TF_WORKDIR/main.tf"
+      - echo "export TF_WORKDIR=\"$TF_WORKDIR\"" > .pipeline.env
+      - chmod 0644 .pipeline.env .env.cloud
+      - echo "Terraform workdir is $TF_WORKDIR"
 
   # ── Step 1: Checkov scan ──────────────────────────────────────────────────
   - name: checkov-scan
     image: *iac_image
     pull: false
     commands:
-      - set -a && . ./.env.cloud && set +a
+      - ls -la .env.cloud
+      - test -r .env.cloud
+      - set -a && . ./.env.cloud && . ./.pipeline.env && set +a
       - >
-        checkov -d . --framework terraform
+        checkov -d "$TF_WORKDIR" --framework terraform
         --output json --soft-fail
         > checkov-results.json
       - echo "✅ Checkov scan done"
@@ -62,9 +78,11 @@ steps:
     image: *iac_image
     pull: false
     commands:
-      - set -a && . ./.env.cloud && set +a
+      - ls -la .env.cloud
+      - test -r .env.cloud
+      - set -a && . ./.env.cloud && . ./.pipeline.env && set +a
       - >
-        tfsec . --format json --no-colour
+        tfsec "$TF_WORKDIR" --format json --no-colour
         --soft-fail --out tfsec-results.json
       - echo "✅ tfsec scan done"
 
@@ -73,9 +91,11 @@ steps:
     image: *iac_image
     pull: false
     commands:
-      - set -a && . ./.env.cloud && set +a
+      - ls -la .env.cloud
+      - test -r .env.cloud
+      - set -a && . ./.env.cloud && . ./.pipeline.env && set +a
       - >
-        trivy config . --format json
+        trivy config "$TF_WORKDIR" --format json
         --output trivy-results.json --exit-code 0
       - echo "✅ Trivy scan done"
 
@@ -84,11 +104,13 @@ steps:
     image: *iac_image
     pull: false
     commands:
-      - set -a && . ./.env.cloud && set +a
+      - ls -la .env.cloud
+      - test -r .env.cloud
+      - set -a && . ./.env.cloud && . ./.pipeline.env && set +a
       - echo "🛠️ Running AWS IaC Auto-Fix Framework..."
       - >
         python .woodpecker/iac-autofix/autofix.py
-        --tf-dir .
+        --tf-dir "$TF_WORKDIR"
         --checkov checkov-results.json
         --tfsec tfsec-results.json
         --trivy trivy-results.json
@@ -121,20 +143,19 @@ steps:
     when:
       status: success
     commands:
-      - set -a && . ./.env.cloud && set +a
+      - set -a && . ./.env.cloud && . ./.pipeline.env && set +a
 
-      # Nếu auto-fix tạo file main.tf đã sửa thì dùng file đó để plan/apply
       - |
         if [ -f fix_output/main.tf ]; then
           echo "✅ Using auto-fixed Terraform file: fix_output/main.tf"
-          cp fix_output/main.tf ./main.tf
+          cp fix_output/main.tf "$TF_WORKDIR/main.tf"
         else
           echo "ℹ️ No fixed main.tf found, using current Terraform files"
         fi
 
-      - terraform init -input=false
-      - terraform validate
-      - terraform plan -input=false -out=tfplan
+      - terraform -chdir="$TF_WORKDIR" init -input=false
+      - terraform -chdir="$TF_WORKDIR" validate
+      - terraform -chdir="$TF_WORKDIR" plan -input=false -out=tfplan
 
   # ── Step 7: Terraform Apply ───────────────────────────────────────────────
   - name: terraform-apply
@@ -144,8 +165,8 @@ steps:
       event: push
       status: success
     commands:
-      - set -a && . ./.env.cloud && set +a
-      - terraform apply -input=false -auto-approve tfplan
+      - set -a && . ./.env.cloud && . ./.pipeline.env && set +a
+      - terraform -chdir="$TF_WORKDIR" apply -input=false -auto-approve tfplan
       - echo "✅ Terraform apply completed"
 
   # ── Step 8: Create Fix PR ────────────────────────────────────────────────

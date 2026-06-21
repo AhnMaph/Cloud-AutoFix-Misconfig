@@ -81,8 +81,13 @@ OPENSTACK_ENABLED = env_bool("OPENSTACK_ENABLED", False)
 REALM     = os.getenv("KEYCLOAK_REALM", "hybrid-cloud")
 CLIENT_ID = os.getenv("KEYCLOAK_CLIENT_ID", "hybrid-cloud-portal")
 
-ISSUER = f"{KEYCLOAK_INTERNAL_URL}/realms/{REALM}"
-JWKS_URL = f"{KEYCLOAK_INTERNAL_URL}/realms/{REALM}/protocol/openid-connect/certs"
+KEYCLOAK_ISSUER = os.getenv(
+    "KEYCLOAK_ISSUER",
+    f"{KEYCLOAK_INTERNAL_URL.rstrip('/')}/realms/{REALM}"
+)
+
+ISSUER = KEYCLOAK_ISSUER.rstrip("/")
+JWKS_URL = f"{KEYCLOAK_INTERNAL_URL.rstrip('/')}/realms/{REALM}/protocol/openid-connect/certs"
 
 jwks_client = PyJWKClient(JWKS_URL)
 
@@ -532,6 +537,13 @@ def get_current_user(
             return verify_token(token)
         except HTTPException:
             pass
+    
+    # if token:
+    #     try:
+    #         return verify_token(token)
+    #     except HTTPException as e:
+    #         print("JWT verify failed:", e.detail)
+    #         raise e
 
     refresh_token = request.cookies.get(COOKIE_REFRESH)
     if not refresh_token:
@@ -725,7 +737,10 @@ def login(req: LoginRequest, response: Response):
 
     return {
         "status": "ok",
+        "access_token": token_data["access_token"],
+        "refresh_token": token_data.get("refresh_token"),
         "expires_in": token_data.get("expires_in"),
+        "token_type": token_data.get("token_type", "Bearer"),
         "session_max_age": SESSION_MAX_AGE,
     }
 
