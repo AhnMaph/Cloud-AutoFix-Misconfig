@@ -33,22 +33,22 @@ export const RESOURCE_FIELDS = {
       key: "image_name",
       label: "Image",
       type: "select",
-      options: ["cirros"],
-      defaultValue: "cirros"
+      options: ["Ubuntu-20.04"],
+      defaultValue: "Ubuntu-20.04"
     },
     {
       key: "flavor_name",
       label: "Flavor",
       type: "select",
-      options: ["m1.tiny"],
+      options: ["m1.tiny", "m1.small", "m1.magnum-worker", "m1.magnum-master"],
       defaultValue: "m1.tiny"
     },
     {
       key: "network_name",
       label: "Network",
       type: "select",
-      options: ["public-net"],
-      defaultValue: "public-net"
+      options: ["public1"],
+      defaultValue: "public1"
     },
   ],
 

@@ -21,7 +21,7 @@ variable "vm_name" {
 
 variable "image_name" {
   type    = string
-  default = "{{ image_name | default('cirros') }}"
+  default = "{{ image_name | default('Ubuntu-20.04') }}"
 }
 
 variable "flavor_name" {
@@ -31,7 +31,7 @@ variable "flavor_name" {
 
 variable "network_name" {
   type    = string
-  default = "{{ network_name | default('public-net') }}"
+  default = "{{ network_name | default('public1') }}"
 }
 
 resource "openstack_networking_secgroup_v2" "tenant_vm_sg" {
