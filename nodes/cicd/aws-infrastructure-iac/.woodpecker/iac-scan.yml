@@ -123,18 +123,19 @@ steps:
     image: *iac_image
     pull: false
     commands:
-      # - curl -i -s http://opa:8181/health || (echo "❌ OPA Server unreachable or wrong Docker network"; exit 1)
-      # - >
-      #   jq -n --argjson data "$(cat fix_output/fix_report.json)" '{"input": $data}' > managed_input.json
-      # - cat managed_input.json
-      # - >
-      #   curl --fail -s -X POST http://opa:8181/v1/data/aws/iac/main
-      #   -H "Content-Type: application/json"
-      #   -d @managed_input.json > opa-response.json
-      # - cat opa-response.json
-      - 'echo "TEMP TEST MODE: skipping OPA block to test Terraform deploy"'
-      - 'echo "{\"result\":[]}" > opa-response.json'
-      - 'echo "OPA temporarily forced to pass"'
+      - curl -i -s http://opa:8181/health || (echo "❌ OPA Server unreachable or wrong Docker network"; exit 1)
+      - >
+        jq -n --argjson data "$(cat fix_output/fix_report.json)" '{"input": $data}' > managed_input.json
+      - cat managed_input.json
+      - >
+        curl --fail -s -X POST http://opa:8181/v1/data/aws/iac/main
+        -H "Content-Type: application/json"
+        -d @managed_input.json > opa-response.json
+      - cat opa-response.json
+      
+      # - 'echo "TEMP TEST MODE: skipping OPA block to test Terraform deploy"'
+      # - 'echo "{\"result\":[]}" > opa-response.json'
+      # - 'echo "OPA temporarily forced to pass"'
   
   # ── Step 6: Terraform Plan ────────────────────────────────────────────────
   - name: terraform-plan

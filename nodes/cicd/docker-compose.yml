@@ -133,6 +133,7 @@ services:
       - WOODPECKER_BACKEND=docker
       # QUAN TRỌNG: agent phải cùng network với Gitea để clone repo
       - WOODPECKER_BACKEND_DOCKER_NETWORK=cicd-global-net
+      - WOODPECKER_BACKEND_DOCKER_VOLUMES=/var/lib/woodpecker-cache:/woodpecker/cache
       # Hostname để Gitea biết agent đang ở đâu
       - WOODPECKER_HOSTNAME=woodpecker-agent
       - WOODPECKER_LOG_LEVEL=info
@@ -141,6 +142,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       # Mount thư mục tools để scanner chạy không cần pull image lại
       - scanner-tools:/opt/scanner-tools
+      - /var/lib/woodpecker-cache:/woodpecker/cache
     networks:
       cicd-net:
         ipv4_address: ${WOODPECKER_AGENT_IP:-172.20.0.12}
