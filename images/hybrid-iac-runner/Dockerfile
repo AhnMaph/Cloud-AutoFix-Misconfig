@@ -51,7 +51,9 @@ RUN curl -fsSL https://aquasecurity.github.io/trivy-repo/deb/public.key \
 RUN pip install --no-cache-dir \
     checkov \
     colorama \
-    requests
+    requests \     
+    PyYAML \
+    python-openstackclient
 
 WORKDIR /woodpecker/src
 
