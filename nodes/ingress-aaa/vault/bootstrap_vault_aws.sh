@@ -8,6 +8,8 @@ set -euo pipefail
 : "${VAULT_BROKER_AWS_SECRET_ACCESS_KEY:?Missing VAULT_BROKER_AWS_SECRET_ACCESS_KEY}"
 : "${KEYCLOAK_ISSUER:?Missing KEYCLOAK_ISSUER}"
 
+vault secrets enable -path=kv kv-v2 2>/dev/null || true
+
 echo "[1/4] Enable AWS secrets engine if needed"
 vault secrets enable -path=aws aws 2>/dev/null || true
 

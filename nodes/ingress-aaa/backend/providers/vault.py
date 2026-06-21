@@ -119,3 +119,80 @@ path "aws/sts/{vault_aws_role}" {{
         "vault_policy": vault_policy_name,
         "vault_jwt_role": vault_jwt_role,
     }
+    
+def write_openstack_tenant_secret(tenant_id: str, credential: dict) -> dict:
+    """
+    Lưu credential OpenStack của tenant vào Vault KV v2.
+
+    Logical path:
+      kv/openstack/tenants/<tenant_id>
+
+    HTTP path thực tế:
+      kv/data/openstack/tenants/<tenant_id>
+    """
+
+    client = vault_client()
+
+    tenant_slug = tenant_id.lower().strip()
+    path = f"openstack/tenants/{tenant_slug}"
+
+    client.secrets.kv.v2.create_or_update_secret(
+        mount_point=VAULT_KV_MOUNT,
+        path=path,
+        secret=credential,
+    )
+
+    return {
+        "tenant_id": tenant_slug,
+        "vault_path": f"{VAULT_KV_MOUNT}/data/{path}",
+        "logical_path": f"{VAULT_KV_MOUNT}/{path}",
+    }
+    
+def provision_vault_openstack_for_tenant(tenant_id: str) -> dict:
+    """
+    Tạo cấu hình Vault cho OpenStack tenant:
+    - policy tenant-<tenant_id>-openstack
+    - auth/jwt/role/<tenant_id>-openstack-pipeline
+
+    Policy chỉ cho đọc đúng secret:
+      kv/data/openstack/tenants/<tenant_id>
+    """
+
+    client = vault_client()
+
+    tenant_slug = tenant_id.lower().strip()
+
+    vault_policy_name = f"tenant-{tenant_slug}-openstack"
+    vault_jwt_role = f"{tenant_slug}-openstack-pipeline"
+
+    secret_path = f"{VAULT_KV_MOUNT}/data/openstack/tenants/{tenant_slug}"
+
+    policy = f'''
+path "{secret_path}" {{
+  capabilities = ["read"]
+}}
+'''
+
+    client.sys.create_or_update_policy(
+        name=vault_policy_name,
+        policy=policy,
+    )
+
+    client.write(
+        f"auth/jwt/role/{vault_jwt_role}",
+        role_type="jwt",
+        user_claim="sub",
+        bound_audiences=[KEYCLOAK_PIPELINE_AUDIENCE],
+        bound_claims={
+            "azp": KEYCLOAK_PIPELINE_CLIENT_ID
+        },
+        policies=[vault_policy_name],
+        ttl="30m",
+    )
+
+    return {
+        "tenant_id": tenant_slug,
+        "vault_policy": vault_policy_name,
+        "vault_jwt_role": vault_jwt_role,
+        "vault_secret_path": secret_path,
+    }

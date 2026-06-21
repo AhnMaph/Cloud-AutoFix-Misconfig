@@ -9,3 +9,4 @@ jinja2
 boto3
 PyYAML
 hvac
+python-openstackclient

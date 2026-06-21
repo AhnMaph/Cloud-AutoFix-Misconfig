@@ -574,12 +574,13 @@ def configure_woodpecker_repo(repo: str, provider: str) -> dict | None:
     full_name = f"{gitea_owner()}/{repo}"
     wp_repo = lookup_woodpecker_repo(full_name)
     repo_id = wp_repo["id"]
-    
+
     repair_woodpecker_repo(repo_id)
-    
+
     tenant_id = repo.rsplit("_", 1)[0]
 
-    # Pipeline needs to call Keycloak/Vault from the Woodpecker VM.
+    # Common secrets for all tenant repos.
+    # Pipeline containers run on CICD VM, so use network-reachable URLs.
     upsert_woodpecker_secret(
         repo_id,
         "KEYCLOAK_TOKEN_URL",
@@ -609,29 +610,43 @@ def configure_woodpecker_repo(repo: str, provider: str) -> dict | None:
 
     upsert_woodpecker_secret(
         repo_id,
-        "VAULT_JWT_ROLE",
-        f"{tenant_id}-pipeline",
+        "GITEA_URL",
+        os.getenv("PIPELINE_GITEA_URL", "http://gitea:3000"),
     )
 
     upsert_woodpecker_secret(
         repo_id,
-        "VAULT_AWS_ROLE",
-        f"{tenant_id}-deploy",
+        "GITEA_TOKEN",
+        gitea_token(),
     )
 
     upsert_woodpecker_secret(
         repo_id,
-        "AWS_DEFAULT_REGION",
-        os.getenv("AWS_DEFAULT_REGION", "us-east-1"),
+        "INGRESS_CALLBACK_TOKEN",
+        os.getenv("CI_CALLBACK_TOKEN", ""),
     )
-
-    # Common secrets for all tenant repos.
-    upsert_woodpecker_secret(repo_id, "GITEA_URL", "http://gitea:3000")
-    upsert_woodpecker_secret(repo_id, "GITEA_TOKEN", gitea_token())
-    upsert_woodpecker_secret(repo_id, "INGRESS_CALLBACK_TOKEN", os.getenv("CI_CALLBACK_TOKEN", ""))
 
     # Provider-specific secrets.
     if provider == "aws":
+        upsert_woodpecker_secret(
+            repo_id,
+            "VAULT_JWT_ROLE",
+            f"{tenant_id}-pipeline",
+        )
+
+        upsert_woodpecker_secret(
+            repo_id,
+            "VAULT_AWS_ROLE",
+            f"{tenant_id}-deploy",
+        )
+
+        upsert_woodpecker_secret(
+            repo_id,
+            "AWS_DEFAULT_REGION",
+            os.getenv("AWS_DEFAULT_REGION", "us-east-1"),
+        )
+
+        # Legacy/fallback AWS envs. Có thể giữ nếu pipeline cũ còn dùng.
         for name in [
             "AWS_ACCESS_KEY_ID",
             "AWS_SECRET_ACCESS_KEY",
@@ -640,19 +655,24 @@ def configure_woodpecker_repo(repo: str, provider: str) -> dict | None:
         ]:
             upsert_woodpecker_secret(repo_id, name, os.getenv(name, ""))
 
-    if provider == "openstack":
-        for name in [
-            "OS_AUTH_URL",
-            "OS_USERNAME",
-            "OS_PASSWORD",
-            "OS_USER_DOMAIN_NAME",
-            "OS_PROJECT_NAME",
-            "OS_PROJECT_DOMAIN_NAME",
-            "OS_REGION_NAME",
-            "OS_INTERFACE",
-            "OS_IDENTITY_API_VERSION",
-        ]:
-            upsert_woodpecker_secret(repo_id, name, os.getenv(name, ""))
+    elif provider == "openstack":
+        upsert_woodpecker_secret(
+            repo_id,
+            "VAULT_JWT_ROLE",
+            f"{tenant_id}-openstack-pipeline",
+        )
+
+        upsert_woodpecker_secret(
+            repo_id,
+            "VAULT_OPENSTACK_PATH",
+            f"{os.getenv('VAULT_KV_MOUNT', 'kv')}/data/openstack/tenants/{tenant_id}",
+        )
+
+        # Không upsert OS_USERNAME/OS_PASSWORD ở đây nữa.
+        # OpenStack credential nằm trong Vault và fetcher sẽ sinh .env.cloud.
+
+    else:
+        raise RuntimeError(f"Unsupported provider for Woodpecker secrets: {provider}")
 
     return {
         "woodpecker_repo_id": repo_id,

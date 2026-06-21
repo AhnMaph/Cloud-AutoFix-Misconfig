@@ -29,15 +29,18 @@ from providers.vault import (
     write_cloud_token,
     read_cloud_token,
     provision_vault_aws_for_tenant,
+    write_openstack_tenant_secret,
+    provision_vault_openstack_for_tenant,
 )
 
-from providers.aws import create_tenant_iam_role, terraform_aws_deploy
-from providers.openstack import create_tenant_project, terraform_openstack_deploy
-try:
-    from providers.openstack import create_tenant_project, terraform_openstack_deploy
-except Exception:
-    create_tenant_project = None
-    terraform_openstack_deploy = None
+from providers.openstack import ensure_openstack_tenant
+
+# from providers.openstack import create_tenant_project, terraform_openstack_deploy
+# try:
+#     from providers.openstack import create_tenant_project, terraform_openstack_deploy
+# except Exception:
+#     create_tenant_project = None
+#     terraform_openstack_deploy = None
 
 from policy.engine import resolve_provider
     
@@ -512,6 +515,80 @@ def extract_tenant_id(user: dict) -> str:
 
     raise HTTPException(status_code=400, detail="Cannot determine tenant_id")
 
+def provision_openstack_for_tenant_record(tenant_id: str):
+    """
+    Auto provision OpenStack giống AWS:
+    - create project/user/quota bên OpenStack
+    - lưu service credential vào Vault KV
+    - tạo Vault policy + JWT role cho pipeline
+    - update tenant record
+    """
+
+    if not OPENSTACK_ENABLED:
+        return update_tenant_record(
+            tenant_id,
+            {
+                "openstack": {
+                    "project_name": tenant_id,
+                    "project_id": None,
+                    "service_user": None,
+                    "vault_secret_path": None,
+                    "vault_jwt_role": None,
+                    "vault_policy": None,
+                    "provisioned": False,
+                    "last_error": "OpenStack provisioning is disabled",
+                }
+            },
+        )
+
+    try:
+        os_credential = ensure_openstack_tenant(tenant_id)
+
+        vault_secret = write_openstack_tenant_secret(
+            tenant_id=tenant_id,
+            credential=os_credential,
+        )
+
+        vault_access = provision_vault_openstack_for_tenant(
+            tenant_id=tenant_id,
+        )
+
+        return update_tenant_record(
+            tenant_id,
+            {
+                "openstack": {
+                    "project_name": os_credential.get("project_name", tenant_id),
+                    "project_id": os_credential.get("project_id"),
+                    "service_user": os_credential.get("username"),
+                    "auth_url": os_credential.get("auth_url"),
+                    "region_name": os_credential.get("region_name"),
+                    "interface": os_credential.get("interface"),
+                    "vault_secret_path": vault_secret.get("vault_path"),
+                    "vault_jwt_role": vault_access.get("vault_jwt_role"),
+                    "vault_policy": vault_access.get("vault_policy"),
+                    "provisioned": True,
+                    "last_error": None,
+                }
+            },
+        )
+
+    except Exception as e:
+        return update_tenant_record(
+            tenant_id,
+            {
+                "openstack": {
+                    "project_name": tenant_id,
+                    "project_id": None,
+                    "service_user": f"svc-{tenant_id}-ci",
+                    "vault_secret_path": None,
+                    "vault_jwt_role": None,
+                    "vault_policy": None,
+                    "provisioned": False,
+                    "last_error": str(e),
+                }
+            },
+        )
+
 # Cloud provider operations
 def get_roles_from_token(user: dict) -> set[str]:
     roles = set()
@@ -679,46 +756,7 @@ def register(req: RegisterRequest):
             },
         )
         
-    if OPENSTACK_ENABLED and create_tenant_project:
-        try:
-            os_project = create_tenant_project(tenant_id)
-
-            tenant_record = update_tenant_record(
-                tenant_id,
-                {
-                    "openstack": {
-                        "project_name": os_project["project_name"],
-                        "project_id": os_project["project_id"],
-                        "provisioned": True,
-                        "last_error": None,
-                    }
-                },
-            )
-
-        except Exception as e:
-            tenant_record = update_tenant_record(
-                tenant_id,
-                {
-                    "openstack": {
-                        "project_name": tenant_id,
-                        "project_id": None,
-                        "provisioned": False,
-                        "last_error": str(e),
-                    }
-                },
-            )
-    else:
-        tenant_record = update_tenant_record(
-            tenant_id,
-            {
-                "openstack": {
-                    "project_name": tenant_id,
-                    "project_id": None,
-                    "provisioned": False,
-                    "last_error": "OpenStack provisioning is disabled",
-                }
-            },
-        )
+    tenant_record = provision_openstack_for_tenant_record(tenant_id)
     
     return {
         "status": "created",
@@ -878,6 +916,19 @@ def deploy_to_repo(
 
     tenant_id = extract_tenant_id(current_user)
     provider = resolve_provider(req.resource_type)
+    
+    if provider == "openstack":
+        if not OPENSTACK_ENABLED:
+            raise HTTPException(
+                status_code=503,
+                detail="OpenStack provider is temporarily disabled"
+            )
+
+        tenant_record = get_tenant_record(tenant_id) or {}
+        openstack_state = tenant_record.get("openstack", {})
+
+        if not openstack_state.get("provisioned"):
+            provision_openstack_for_tenant_record(tenant_id)
 
     deployment_id = f"dep-{uuid.uuid4().hex[:12]}"
 
@@ -896,7 +947,7 @@ def deploy_to_repo(
 
         # OpenStack
         "os_region_name": os.getenv("OS_REGION_NAME", "RegionOne"),
-        "os_auth_url": os.getenv("OS_AUTH_URL", ""),
+        "os_auth_url": os.getenv("OPENSTACK_AUTH_URL", "http://192.168.9.254:5000"),
 
         **req.extra,
     }
@@ -981,30 +1032,35 @@ def deploy(
             workdir=tf_file.parent,
         )
 
+    # elif provider == "openstack":
+    #     if terraform_openstack_deploy is None:
+    #         raise HTTPException(
+    #             status_code=500,
+    #             detail="OpenStack deploy function is not available"
+    #         )
+
+    #     # Đảm bảo project tenant tồn tại trước khi Terraform chạy.
+    #     if create_tenant_project:
+    #         create_tenant_project(tenant_id)
+
+    #     from providers.openstack import prepare_openstack_workspace
+
+    #     workdir = prepare_openstack_workspace(
+    #         tenant_id=tenant_id,
+    #         resource_type=req.resource_type,
+    #         generated_tf_file=tf_file,
+    #     )
+
+    #     result = terraform_openstack_deploy(
+    #         tenant_id=tenant_id,
+    #         resource_type=req.resource_type,
+    #         action=req.action,
+    #         workdir=workdir,
+    #     )
     elif provider == "openstack":
-        if terraform_openstack_deploy is None:
-            raise HTTPException(
-                status_code=500,
-                detail="OpenStack deploy function is not available"
-            )
-
-        # Đảm bảo project tenant tồn tại trước khi Terraform chạy.
-        if create_tenant_project:
-            create_tenant_project(tenant_id)
-
-        from providers.openstack import prepare_openstack_workspace
-
-        workdir = prepare_openstack_workspace(
-            tenant_id=tenant_id,
-            resource_type=req.resource_type,
-            generated_tf_file=tf_file,
-        )
-
-        result = terraform_openstack_deploy(
-            tenant_id=tenant_id,
-            resource_type=req.resource_type,
-            action=req.action,
-            workdir=workdir,
+        raise HTTPException(
+            status_code=400,
+            detail="OpenStack direct deploy is disabled. Use /deploy/repo so CI/CD can fetch credentials from Vault."
         )
 
     else:
@@ -1357,20 +1413,29 @@ def accept_deployment(
                 workdir=workdir,
             )
 
+        # elif provider == "openstack":
+        #     if terraform_openstack_deploy is None:
+        #         raise RuntimeError("OpenStack deploy function is not available")
+
+        #     # Đảm bảo OpenStack project tenant tồn tại.
+        #     if create_tenant_project:
+        #         create_tenant_project(tenant_id)
+
+        #     result = terraform_openstack_deploy(
+        #         tenant_id=tenant_id,
+        #         resource_type=resource_type,
+        #         action=action,
+        #         workdir=workdir,
+        #     )
+        
         elif provider == "openstack":
-            if terraform_openstack_deploy is None:
-                raise RuntimeError("OpenStack deploy function is not available")
-
-            # Đảm bảo OpenStack project tenant tồn tại.
-            if create_tenant_project:
-                create_tenant_project(tenant_id)
-
-            result = terraform_openstack_deploy(
-                tenant_id=tenant_id,
-                resource_type=resource_type,
-                action=action,
-                workdir=workdir,
-            )
+            result = {
+                "status": "approved",
+                "message": (
+                    "OpenStack deployment approved. "
+                    "Terraform apply should be handled by the Woodpecker pipeline using Vault credentials."
+                ),
+            }
 
         else:
             raise RuntimeError(f"Unsupported provider: {provider}")
