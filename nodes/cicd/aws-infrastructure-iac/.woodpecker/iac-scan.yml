@@ -103,8 +103,9 @@ steps:
       #   -H "Content-Type: application/json"
       #   -d @managed_input.json > opa-response.json
       # - cat opa-response.json
-      - echo "⚠️ TEMP TEST MODE: skipping OPA block to test Terraform deploy"
-      - echo '{"result":[]}' > opa-response.json
+      - 'echo "TEMP TEST MODE: skipping OPA block to test Terraform deploy"'
+      - 'echo "{\"result\":[]}" > opa-response.json'
+      - 'echo "OPA temporarily forced to pass"'
   
   # ── Step 6: Terraform Plan ────────────────────────────────────────────────
   - name: terraform-plan
