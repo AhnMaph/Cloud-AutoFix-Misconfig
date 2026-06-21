@@ -141,11 +141,13 @@ steps:
   - name: terraform-plan
     image: *iac_image
     pull: false
+    environment:
+      TF_PLUGIN_CACHE_DIR: /opt/terraform-plugin-cache
     when:
       status: success
     commands:
+      - terraform -chdir="$TF_WORKDIR" init -input=false
       - set -a && . ./.env.cloud && . ./.pipeline.env && set +a
-
       - |
         if [ -f fix_output/main.tf ]; then
           echo "✅ Using auto-fixed Terraform file: fix_output/main.tf"
@@ -162,10 +164,13 @@ steps:
   - name: terraform-apply
     image: *iac_image
     pull: false
+    environment:
+      TF_PLUGIN_CACHE_DIR: /opt/terraform-plugin-cache
     when:
       event: push
       status: success
     commands:
+      - terraform -chdir="$TF_WORKDIR" init -input=false
       - set -a && . ./.env.cloud && . ./.pipeline.env && set +a
       - terraform -chdir="$TF_WORKDIR" apply -input=false -auto-approve tfplan
       - echo "✅ Terraform apply completed"
