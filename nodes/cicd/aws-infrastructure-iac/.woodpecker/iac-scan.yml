@@ -16,11 +16,15 @@ variables:
   - &python_image python:3.11-slim
   - &fix_dir fix_output
   - &skip_security_gate true
+  - &iac_image hybrid-iac-runner:latest
+  - &fix_dir fix_output
+  - &skip_security_gate true
 
 steps:
 # ── Step 0: Fetch AWS creds from Vault ─────────────────────────────────────
   - name: fetch-aws-creds-from-vault
-    image: python:3.11-slim
+    image: *iac_image
+    pull: false
     environment:
       KEYCLOAK_TOKEN_URL:
         from_secret: KEYCLOAK_TOKEN_URL
@@ -37,14 +41,14 @@ steps:
       AWS_DEFAULT_REGION:
         from_secret: AWS_DEFAULT_REGION
     commands:
-      - pip install -q requests
       - python .woodpecker/fetcher/fetch_aws_creds_from_vault.py > .env.cloud
       - chmod 600 .env.cloud
       - echo "✅ AWS temporary credentials fetched from Vault before scan"
 
   # ── Step 1: Checkov scan ──────────────────────────────────────────────────
   - name: checkov-scan
-    image: bridgecrew/checkov:latest
+    image: *iac_image
+    pull: false
     commands:
       - set -a && . ./.env.cloud && set +a
       - >
@@ -55,7 +59,8 @@ steps:
 
   # ── Step 2: tfsec scan ───────────────────────────────────────────────────
   - name: tfsec-scan
-    image: aquasec/tfsec:latest
+    image: *iac_image
+    pull: false
     commands:
       - set -a && . ./.env.cloud && set +a
       - >
@@ -65,7 +70,8 @@ steps:
 
   # ── Step 3: Trivy scan ───────────────────────────────────────────────────
   - name: trivy-scan
-    image: aquasec/trivy:latest
+    image: *iac_image
+    pull: false
     commands:
       - set -a && . ./.env.cloud && set +a
       - >
@@ -75,10 +81,10 @@ steps:
 
   # ── Step 4: IaC Auto-Fix ─────────────────────────────────────────────────
   - name: iac-autofix
-    image: python:3.11-slim
+    image: *iac_image
+    pull: false
     commands:
       - set -a && . ./.env.cloud && set +a
-      - pip install -q colorama
       - echo "🛠️ Running AWS IaC Auto-Fix Framework..."
       - >
         python .woodpecker/iac-autofix/autofix.py
@@ -92,7 +98,8 @@ steps:
 
   # ── Step 5: OPA policy check ─────────────────────────────────────────────
   - name: opa-policy-check
-    image: badouralix/curl-jq:latest
+    image: *iac_image
+    pull: false
     commands:
       # - curl -i -s http://opa:8181/health || (echo "❌ OPA Server unreachable or wrong Docker network"; exit 1)
       # - >
@@ -109,7 +116,8 @@ steps:
   
   # ── Step 6: Terraform Plan ────────────────────────────────────────────────
   - name: terraform-plan
-    image: hashicorp/terraform:latest
+    image: *iac_image
+    pull: false
     when:
       status: success
     commands:
@@ -130,7 +138,8 @@ steps:
 
   # ── Step 7: Terraform Apply ───────────────────────────────────────────────
   - name: terraform-apply
-    image: hashicorp/terraform:latest
+    image: *iac_image
+    pull: false
     when:
       event: push
       status: success
@@ -142,7 +151,8 @@ steps:
   # ── Step 8: Create Fix PR ────────────────────────────────────────────────
   # Chạy trước notify-ingress để dashboard chỉ hiện Accept Auto-Fix khi PR đã tồn tại.
   - name: create-fix-pr
-    image: alpine:3.19
+    image: *iac_image
+    pull: false
     when:
       event: push
       status: success
@@ -152,14 +162,14 @@ steps:
       GITEA_TOKEN:
         from_secret: GITEA_TOKEN
     commands:
-      - apk add --no-cache git python3
       - git config --global --add safe.directory '*'
       - echo "🚀 Creating AWS auto-fix PR if fixes were applied..."
       - python3 .woodpecker/iac-autofix/gitea_pr.py --fix-dir fix_output --report-json fix_output/fix_report.json --report-md fix_output/PR_SUMMARY.md
 
   # ── Step 7: Notify Ingress with OPA decision + scan summary ───────────────
   - name: notify-ingress
-    image: badouralix/curl-jq:latest
+    image: *iac_image
+    pull: false
     when:
       status: [success, failure]
     environment:
@@ -279,7 +289,8 @@ steps:
 
   # ── Step 9: Log to ELK ───────────────────────────────────────────────────
   - name: log-to-elk
-    image: badouralix/curl-jq:latest
+    image: *iac_image
+    pull: false
     when:
       status: [success, failure]
     commands:
