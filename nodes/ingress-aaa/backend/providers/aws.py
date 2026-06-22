@@ -97,7 +97,11 @@ def create_tenant_iam_role(tenant_id: str, aws_account_id: str) -> dict:
 
                     # Các quyền write config mà template đang quản lý
                     "s3:PutBucket*",
+                    "s3:PutBucketAcl",
+                    "s3:GetBucketAcl",
                     "s3:DeleteBucket*",
+                    "s3:GetBucketLogging",
+                    "s3:PutBucketLogging",
                     "s3:Put*Configuration",
                     "s3:Delete*Configuration"
                 ],
@@ -118,6 +122,30 @@ def create_tenant_iam_role(tenant_id: str, aws_account_id: str) -> dict:
                 "Resource": [
                     f"arn:aws:s3:::{bucket_prefix}*/*"
                 ]
+            },
+            {
+                "Sid": "TenantKmsForS3",
+                "Effect": "Allow",
+                "Action": [
+                    "kms:CreateKey",
+                    "kms:CreateAlias",
+                    "kms:UpdateAlias",
+                    "kms:DeleteAlias",
+                    "kms:DescribeKey",
+                    "kms:GetKeyPolicy",
+                    "kms:PutKeyPolicy",
+                    "kms:EnableKeyRotation",
+                    "kms:GetKeyRotationStatus",
+                    "kms:ScheduleKeyDeletion",
+                    "kms:CancelKeyDeletion",
+                    "kms:TagResource",
+                    "kms:UntagResource",
+                    "kms:ListResourceTags",
+		    "kms:ListAliases",
+		    "kms:ListKeys",
+                    "kms:ListAliases"
+                ],
+                "Resource": "*"
             }
         ]
     }

@@ -1,3 +1,12 @@
+const getResourceLabel = (resourceType) => {
+  const labels = {
+    object_storage: "File Storage",
+    cache: "Cache",
+    vm: "Virtual Machine",
+    database: "Database",
+  };
+  return labels[resourceType] || resourceType || "Resource";
+};
 export default function DeployResult({ result, onClose }) {
   const statusColor   = result.status === "planned" ? "#fbbf24"
                       : result.status === "applied"  ? "#4aff7a"
@@ -27,7 +36,7 @@ export default function DeployResult({ result, onClose }) {
 
       {/* Meta rows */}
       {[
-        ["Resource", result.resource_type],
+        ["Resource", getResourceLabel(result.resource_type)],
         ["Status", <span style={{ color: statusColor, fontWeight: "700" }}>{result.status?.toUpperCase()}</span>],
       ].map(([k, v]) => (
         <div key={k} style={rowStyle}>

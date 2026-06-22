@@ -300,6 +300,9 @@ def push_iac_request_to_gitea(
         run_cmd(["git", "config", "user.name", "Hybrid Cloud Portal Bot"], cwd=repo_dir)
         run_cmd(["git", "config", "user.email", "portal-bot@local.test"], cwd=repo_dir)
 
+        # Keep CI/CD pipeline definitions current for existing tenant repos.
+        copy_pipeline_files(provider, repo_dir)
+
         tf_workdir = Path(resource_type)
         target_dir = repo_dir / tf_workdir
         target_dir.mkdir(parents=True, exist_ok=True)

@@ -5,9 +5,9 @@ from collections import defaultdict
 from pathlib import Path
 
 
-SEV_EMOJI = {"CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡", "LOW": "🟢", "UNKNOWN": "⚪"}
+SEV_EMOJI = {"CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡", "LOW": "🟢", "INFO": "🔵", "UNKNOWN": "⚪"}
 SEV_COLOR = {"CRITICAL": "#dc2626", "HIGH": "#ea580c", "MEDIUM": "#ca8a04",
-             "LOW": "#16a34a", "UNKNOWN": "#6b7280"}
+             "LOW": "#16a34a", "INFO": "#2563eb", "UNKNOWN": "#6b7280"}
 
 
 def generate_report(data: dict, md_path: Path, html_path: Path):
@@ -116,12 +116,14 @@ def _build_markdown(data: dict) -> str:
             "<details>",
             "<summary>⏭ Skipped findings (no fixer rule)</summary>",
             "",
-            "| Check ID | File | Resource | Reason |",
-            "|----------|------|----------|--------|",
+            "| Check ID | Severity | File | Resource | Reason |",
+            "|----------|----------|------|----------|--------|",
         ]
         for r in skipped:
+            sev   = r.get("severity", "UNKNOWN")
+            emoji = SEV_EMOJI.get(sev, "⚪")
             lines.append(
-                f"| `{r['rule_id']}` | `{_short(r.get('file_path', ''))}` "
+                f"| `{r['rule_id']}` | {emoji} {sev} | `{_short(r.get('file_path', ''))}` "
                 f"| `{r.get('resource','N/A')}` | {r.get('reason','')} |"
             )
         lines += ["", "</details>", ""]
@@ -238,6 +240,7 @@ def _build_html(data: dict) -> str:
 
     skipped_rows = "".join(
         f"<tr><td><code>{r['rule_id']}</code></td>"
+        f"<td>{badge(r.get('severity','UNKNOWN'))}</td>"
         f"<td><code>{_short(r.get('file_path', ''))}</code></td>"
         f"<td><code>{r.get('resource','N/A')}</code></td>"
         f"<td>{r.get('reason','')}</td></tr>"
@@ -313,7 +316,7 @@ details summary{{cursor:pointer;color:#94a3b8;font-size:.875rem;margin-bottom:8p
 
 {'<section><h2>❌ Fix Failures</h2><table><tr><th>Check ID</th><th>File</th><th>Reason</th></tr>' + failed_rows + '</table></section>' if failed else ''}
 
-{'<section><details><summary>⏭ Skipped findings (' + str(len(skipped)) + ')</summary><table><tr><th>Check ID</th><th>File</th><th>Resource</th><th>Reason</th></tr>' + skipped_rows + '</table></details></section>' if skipped else ''}
+{'<section><details><summary>⏭ Skipped findings (' + str(len(skipped)) + ')</summary><table><tr><th>Check ID</th><th>Severity</th><th>File</th><th>Resource</th><th>Reason</th></tr>' + skipped_rows + '</table></details></section>' if skipped else ''}
 
 <section>
   <h2>📋 Manual Review Required</h2>

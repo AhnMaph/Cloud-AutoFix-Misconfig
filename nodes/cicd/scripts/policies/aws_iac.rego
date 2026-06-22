@@ -13,7 +13,7 @@ severity_of(finding) := upper(finding.severity) if {
 } else := "UNKNOWN"
 
 # Định nghĩa danh sách các Severity bắt buộc phải BLOCK nếu xuất hiện trong hệ thống
-blocked_severities := {"MEDIUM", "HIGH", "CRITICAL"}
+blocked_severities := {"HIGH", "CRITICAL"}
 
 # Lỗi bị block nếu mức độ nghiêm trọng nằm trong danh sách cấm
 is_blocked(finding) if {

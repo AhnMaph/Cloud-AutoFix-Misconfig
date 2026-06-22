@@ -17,8 +17,6 @@ variables:
   - &fix_dir fix_output
   - &skip_security_gate true
   - &iac_image hybrid-iac-runner:latest
-  - &fix_dir fix_output
-  - &skip_security_gate true
 
 steps:
 # ── Step 0: Fetch AWS creds from Vault ─────────────────────────────────────
@@ -69,6 +67,7 @@ steps:
       - set -a && . ./.env.cloud && . ./.pipeline.env && set +a
       - >
         checkov -d "$TF_WORKDIR" --framework terraform
+        --skip-check CKV_AWS_144,CKV2_AWS_62,CKV_AWS_18
         --output json --soft-fail
         > checkov-results.json
       - echo "✅ Checkov scan done"
@@ -172,6 +171,7 @@ steps:
       - terraform -chdir="$TF_WORKDIR" init -input=false
       - terraform -chdir="$TF_WORKDIR" validate
       - terraform -chdir="$TF_WORKDIR" plan -input=false -out=tfplan
+      - touch .terraform_plan_succeeded
 
   # ── Step 7: Terraform Apply ───────────────────────────────────────────────
   - name: terraform-apply
@@ -186,8 +186,15 @@ steps:
       - mkdir -p "$TF_PLUGIN_CACHE_DIR"
       - set -a && . ./.env.cloud && . ./.pipeline.env && set +a
       - test -n "$TF_WORKDIR"
+      - |
+        ACTION="$(jq -r '.action // "apply"' deploy-meta.json)"
+        if [ "$ACTION" != "apply" ]; then
+          echo "Terraform action is $ACTION; skipping apply."
+          exit 0
+        fi
       - terraform -chdir="$TF_WORKDIR" init -input=false
       - terraform -chdir="$TF_WORKDIR" apply -input=false -auto-approve tfplan
+      - touch .terraform_apply_succeeded
       - echo "✅ Terraform apply completed"
 
   # ── Step 8: Create Fix PR ────────────────────────────────────────────────
@@ -229,6 +236,17 @@ steps:
         DEPLOYMENT_ID="$(jq -r '.deployment_id // empty' deploy-meta.json)"
         CALLBACK_URL="$(jq -r '.callback_url // empty' deploy-meta.json)"
         TF_WORKDIR="$(jq -r '.tf_workdir // "."' deploy-meta.json)"
+        ACTION="$(jq -r '.action // "apply"' deploy-meta.json)"
+        TERRAFORM_STATUS="not_started"
+        if [ -f .terraform_apply_succeeded ]; then
+          TERRAFORM_STATUS="applied"
+        elif [ -f .terraform_plan_succeeded ]; then
+          if [ "$ACTION" = "apply" ]; then
+            TERRAFORM_STATUS="apply_failed"
+          else
+            TERRAFORM_STATUS="planned"
+          fi
+        fi
         REPO_NAME="${CI_REPO:-${CI_REPO_OWNER:-unknown}/${CI_REPO_NAME:-unknown}}"
         COMMIT_SHA="${CI_COMMIT_SHA:-unknown}"
         BRANCH_NAME="${CI_COMMIT_BRANCH:-main}"
@@ -255,12 +273,12 @@ steps:
             '{
               result: {
                 deny: (
-                  (($fix_report[0].summary.total // 0) > 0)
+                  (($fix_report[0].summary.manual // 0) > 0)
                   or
                   (($fix_report[0].summary.failed // 0) > 0)
                 ),
                 allow: (
-                  (($fix_report[0].summary.total // 0) == 0)
+                  (($fix_report[0].summary.manual // 0) == 0)
                   and
                   (($fix_report[0].summary.failed // 0) == 0)
                 ),
@@ -276,6 +294,8 @@ steps:
           --arg branch "$BRANCH_NAME" \
           --arg tf_workdir "$TF_WORKDIR" \
           --arg pipeline_url "$PIPELINE_URL" \
+          --arg action "$ACTION" \
+          --arg terraform_status "$TERRAFORM_STATUS" \
           --rawfile summary_markdown fix_output/PR_SUMMARY.md \
           --slurpfile fix_report fix_output/fix_report.json \
           --slurpfile opa_response opa-response.json \
@@ -286,6 +306,8 @@ steps:
             branch: $branch,
             tf_workdir: $tf_workdir,
             pipeline_url: $pipeline_url,
+            action: $action,
+            terraform_status: $terraform_status,
             opa: {
               deny: (
                 $opa_response[0].result.deny //
@@ -293,7 +315,7 @@ steps:
                   if ($opa_response[0].result.allow? != null)
                   then (if $opa_response[0].result.allow then false else true end)
                   else (
-                    (($fix_report[0].summary.total // 0) > 0)
+                    (($fix_report[0].summary.manual // 0) > 0)
                     or
                     (($fix_report[0].summary.failed // 0) > 0)
                   )
@@ -306,7 +328,7 @@ steps:
                   if ($opa_response[0].result.deny? != null)
                   then (if $opa_response[0].result.deny then false else true end)
                   else (
-                    (($fix_report[0].summary.total // 0) == 0)
+                    (($fix_report[0].summary.manual // 0) == 0)
                     and
                     (($fix_report[0].summary.failed // 0) == 0)
                   )

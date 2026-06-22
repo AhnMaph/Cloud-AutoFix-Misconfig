@@ -17,8 +17,27 @@ export const RESOURCE_FIELDS = {
       key: "versioning",
       label: "Keep File History",
       type: "select",
-      options: ["Enabled", "Disabled"],
+      options: ["Enabled", "Suspended"],
       defaultValue: "Enabled"
+    },
+    {
+      key: "expiration_days",
+      label: "Delete Current Objects After Days",
+      placeholder: "365",
+      defaultValue: "365"
+    },
+    {
+      key: "noncurrent_expiration_days",
+      label: "Delete Old Versions After Days",
+      placeholder: "90",
+      defaultValue: "90"
+    },
+    {
+      key: "force_destroy",
+      label: "Force Delete Non-empty Bucket",
+      type: "select",
+      options: ["false", "true"],
+      defaultValue: "false"
     },
   ],
 
@@ -57,3 +76,13 @@ export const RESOURCE_FIELDS = {
     { key: "num_nodes", label: "Number of Nodes", placeholder: "1", defaultValue: "1" },
   ],
 };
+export const RESOURCE_LABELS = {
+  object_storage: "File Storage",
+  cache: "Cache",
+  vm: "Virtual Machine",
+  database: "Database",
+};
+
+export function getResourceLabel(resourceType) {
+  return RESOURCE_LABELS[resourceType] || resourceType || "Resource";
+}

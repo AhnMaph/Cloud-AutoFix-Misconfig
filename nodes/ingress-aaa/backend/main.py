@@ -154,6 +154,8 @@ class CiOpaResultRequest(BaseModel):
     branch: str | None = None
     tf_workdir: str | None = None
     pipeline_url: str | None = None
+    action: str | None = None
+    terraform_status: Literal["not_started", "planned", "applied", "apply_failed"] | None = None
     opa: OpaDecision
     summary_markdown: str | None = None
     fix_report: dict = {}
@@ -1169,11 +1171,13 @@ def receive_opa_result(
     skipped = int(summary.get("skipped", 0) or 0)
 
     # Defensive guard:
-    # Nếu scanner report không có finding nào thì không được block deployment.
-    # Trường hợp này thường xảy ra khi OPA response bị missing/malformed
-    # nhưng notify-ingress fallback deny=true.
-    if total == 0 and fixed == 0 and manual == 0 and failed == 0 and skipped == 0:
+    # Do not block deployment when only non-fixable LOW/MEDIUM skipped findings remain.
+    # This also protects against notify-ingress fallback payloads when opa-response.json
+    # is missing in the final pipeline step.
+    if manual == 0 and failed == 0 and fixed == 0:
         deny = False
+
+    terraform_status = req.terraform_status
 
     if deny:
         if fixed > 0:
@@ -1185,9 +1189,18 @@ def receive_opa_result(
         else:
             status = "blocked_by_policy"
             recommendation = "Policy denied deployment."
+    elif terraform_status == "applied":
+        status = "applied"
+        recommendation = "Policy passed. Terraform apply completed in CI/CD pipeline."
+    elif terraform_status == "planned":
+        status = "planned"
+        recommendation = "Policy passed. Terraform plan completed in CI/CD pipeline."
+    elif terraform_status == "apply_failed":
+        status = "apply_failed"
+        recommendation = "Policy passed, but Terraform apply failed in CI/CD pipeline. Review the pipeline logs."
     else:
         status = "waiting_user_approval"
-        recommendation = "Policy passed. Ask user to accept or deny Terraform deployment."
+        recommendation = "Policy passed. Waiting for Terraform pipeline completion."
 
     updated = update_deployment(
         req.deployment_id,
@@ -1198,6 +1211,8 @@ def receive_opa_result(
             "branch": req.branch or deployment.get("branch"),
             "tf_workdir": req.tf_workdir or deployment.get("tf_workdir"),
             "pipeline_url": req.pipeline_url,
+            "action": req.action or deployment.get("action"),
+            "terraform_status": terraform_status,
             "opa": {
                 "deny": deny,
             },

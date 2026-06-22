@@ -1,10 +1,19 @@
 import { useEffect, useRef, useState } from "react";
 import { styles } from "../styles";
-import { RESOURCE_TYPES } from "../constants/resources";
 import ResourceForm from "./ResourceForm";
 import DeployResult from "./DeployResult";
 import MarkdownContent from "./MarkdownContent";
 import { api } from "../api/client";
+import { RESOURCE_TYPES } from "../constants/resources";
+const getResourceLabel = (resourceType) => {
+  const labels = {
+    object_storage: "File Storage",
+    cache: "Cache",
+    vm: "Virtual Machine",
+    database: "Database",
+  };
+  return labels[resourceType] || resourceType || "Resource";
+};
 
 export default function Dashboard({ me, onLogout }) {
   const [activeResource, setActiveResource] = useState(null);
@@ -290,7 +299,7 @@ export default function Dashboard({ me, onLogout }) {
 
             <div style={infoLineStyle}>
               <b>Resource:</b> {deployment.provider} /{" "}
-              {deployment.resource_type}
+              {getResourceLabel(deployment.resource_type)}
             </div>
 
             <div style={infoLineStyle}>
