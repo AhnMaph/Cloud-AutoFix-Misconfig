@@ -11,66 +11,35 @@ provider "openstack" {}
 
 variable "tenant_id" {
   type    = string
-  default = "{{ tenant_id }}"
+  default = "acme-corp"
 }
 
 variable "vm_name" {
   type    = string
-  default = "{{ vm_name | default('demo-vm') }}"
+  default = "web-02"
 }
 
 variable "image_name" {
   type    = string
-  default = "{{ image_name | default('Ubuntu-20.04') }}"
+  default = "Ubuntu-20.04"
 }
 
 variable "flavor_name" {
   type    = string
-  default = "{{ flavor_name | default('m1.tiny') }}"
+  default = "m1.tiny"
 }
 
 variable "network_name" {
   type    = string
-  default = "{{ network_name | default('public1') }}"
+  default = "public1"
 }
 
 variable "private_subnet_cidr" {
   type    = string
-  default = "{{ private_subnet_cidr | default('10.0.0.0/24') }}"
+  default = "10.0.0.0/24"
 }
 
-{% if create_network | default(false) %}
-data "openstack_networking_network_v2" "external_net" {
-  name = var.network_name
-}
 
-resource "openstack_networking_network_v2" "private_net" {
-  count          = 1
-  name           = "${var.tenant_id}-private-net"
-  admin_state_up = true
-}
-
-resource "openstack_networking_subnet_v2" "private_subnet" {
-  count      = 1
-  name       = "${var.tenant_id}-private-subnet"
-  network_id = openstack_networking_network_v2.private_net[0].id
-  cidr       = var.private_subnet_cidr
-  ip_version = 4
-}
-
-resource "openstack_networking_router_v2" "tenant_router" {
-  count               = 1
-  name                = "${var.tenant_id}-router"
-  external_network_id = data.openstack_networking_network_v2.external_net.id
-  admin_state_up      = true
-}
-
-resource "openstack_networking_router_interface_v2" "private_interface" {
-  count     = 1
-  router_id = openstack_networking_router_v2.tenant_router[0].id
-  subnet_id = openstack_networking_subnet_v2.private_subnet[0].id
-}
-{% else %}
 data "openstack_networking_network_v2" "existing_private_net" {
   count = 1
   name  = "${var.tenant_id}-private-net"
@@ -81,7 +50,7 @@ data "openstack_networking_subnet_v2" "existing_private_subnet" {
   name       = "${var.tenant_id}-private-subnet"
   network_id = data.openstack_networking_network_v2.existing_private_net[0].id
 }
-{% endif %}
+
 
 resource "openstack_networking_secgroup_v2" "tenant_vm_sg" {
   name        = "${var.tenant_id}-${var.vm_name}-sg"
@@ -113,19 +82,11 @@ resource "openstack_compute_instance_v2" "tenant_vm" {
     openstack_networking_secgroup_v2.tenant_vm_sg.name
   ]
 
-{% if create_network | default(false) %}
-  depends_on = [
-    openstack_networking_router_interface_v2.private_interface,
-  ]
 
-  network {
-    uuid = openstack_networking_network_v2.private_net[0].id
-  }
-{% else %}
   network {
     uuid = data.openstack_networking_network_v2.existing_private_net[0].id
   }
-{% endif %}
+
 
   metadata = {
     tenant     = var.tenant_id

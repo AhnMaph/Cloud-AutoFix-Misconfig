@@ -132,6 +132,18 @@ steps:
         -H "Content-Type: application/json"
         -d @managed_input.json > opa-response.json
       - cat opa-response.json
+      - |
+        DENY="$(jq -r '.result.deny // false' opa-response.json)"
+        ALLOW="$(jq -r '.result.allow // empty' opa-response.json)"
+
+        echo "OPA deny=$DENY allow=$ALLOW"
+
+        if [ "$DENY" = "true" ]; then
+          echo "❌ OPA denied this deployment. Stop before terraform plan/apply."
+          exit 1
+        fi
+
+        echo "✅ OPA passed. Continue terraform plan/apply."
       
       # - 'echo "TEMP TEST MODE: skipping OPA block to test Terraform deploy"'
       # - 'echo "{\"result\":[]}" > opa-response.json'
@@ -142,12 +154,14 @@ steps:
     image: *iac_image
     pull: false
     environment:
-      TF_PLUGIN_CACHE_DIR: /opt/terraform-plugin-cache
+      TF_PLUGIN_CACHE_DIR: /woodpecker/cache/terraform/plugin-cache
     when:
       status: success
     commands:
-      - terraform -chdir="$TF_WORKDIR" init -input=false
+      - mkdir -p "$TF_PLUGIN_CACHE_DIR"
       - set -a && . ./.env.cloud && . ./.pipeline.env && set +a
+      - test -n "$TF_WORKDIR"
+      - test -f "$TF_WORKDIR/main.tf"
       - |
         if [ -f fix_output/main.tf ]; then
           echo "✅ Using auto-fixed Terraform file: fix_output/main.tf"
@@ -155,7 +169,6 @@ steps:
         else
           echo "ℹ️ No fixed main.tf found, using current Terraform files"
         fi
-
       - terraform -chdir="$TF_WORKDIR" init -input=false
       - terraform -chdir="$TF_WORKDIR" validate
       - terraform -chdir="$TF_WORKDIR" plan -input=false -out=tfplan
@@ -165,13 +178,15 @@ steps:
     image: *iac_image
     pull: false
     environment:
-      TF_PLUGIN_CACHE_DIR: /opt/terraform-plugin-cache
+      TF_PLUGIN_CACHE_DIR: /woodpecker/cache/terraform/plugin-cache
     when:
       event: push
       status: success
     commands:
-      - terraform -chdir="$TF_WORKDIR" init -input=false
+      - mkdir -p "$TF_PLUGIN_CACHE_DIR"
       - set -a && . ./.env.cloud && . ./.pipeline.env && set +a
+      - test -n "$TF_WORKDIR"
+      - terraform -chdir="$TF_WORKDIR" init -input=false
       - terraform -chdir="$TF_WORKDIR" apply -input=false -auto-approve tfplan
       - echo "✅ Terraform apply completed"
 
